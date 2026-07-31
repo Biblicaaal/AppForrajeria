@@ -1,0 +1,29 @@
+﻿{
+    "printers":  [
+                     {
+                         "name":  "Fax",
+                         "default":  false
+                     },
+                     {
+                         "name":  "Microsoft Print to PDF",
+                         "default":  false
+                     },
+                     {
+                         "name":  "Microsoft XPS Document Writer",
+                         "default":  false
+                     },
+                     {
+                         "name":  "OneNote for Windows 10",
+                         "default":  false
+                     },
+                     {
+                         "name":  "PDFsam Enhanced 7",
+                         "default":  false
+                     },
+                     {
+                         "name":  "POS58 Printer",
+                         "default":  true
+                     }
+                 ],
+    "generatedAt":  "2026-07-08T21:24:01"
+}
