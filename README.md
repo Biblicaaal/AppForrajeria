@@ -1,20 +1,47 @@
-# AppCajaPana
+# La Vieja Esquina
 
 Caja Local Web para forrajeria, reconstruida como app estatica local-first.
 
 ## Uso
 
-Abrir `index.html` en el navegador. No requiere Python, Flask, Node ni servidor backend.
+Abrir `LaViejaEsquina.exe`. No abrir `index.html` ni usar la direccion de preview para ventas reales: el ejecutable mantiene siempre el mismo perfil de datos, inicia la copia de seguridad local y abre la caja sin consola.
 
-La informacion se guarda localmente en el navegador con IndexedDB.
+Cada operacion se guarda primero en IndexedDB y tambien se copia automaticamente a `_data/app-data.json`. El archivo anterior queda en `_data/app-data.previous.json`; las copias creadas antes de una limpieza quedan en `_data/archives`. La aplicacion restaura esa copia si el perfil del navegador aparece vacio.
+
+La actualizacion de la base es incremental: conserva usuarios, ventas, cierres, stock e historial existentes y agrega los nuevos almacenes sin reiniciar datos.
+
+## Stock y Excel
+
+En `STOCK`, los usuarios admin/dev tienen dos acciones:
+
+- `Importar .xlsx`: por defecto reemplaza solamente `En la planilla`. Tambien permite actualizar de forma explicita `En la tienda`, sin borrar los productos que no aparezcan en el archivo.
+- `Exportar .xlsx`: descarga un libro con `Resumen`, `En tienda` y `En la planilla`, listo para volver a importar.
+
+La importacion reconoce la hoja `Inventario` y las columnas de la planilla oficial (`ID`, `Categoria`, `Marca`, `Producto`, `Variante`, `Stock`, `Stock Min`, `Unidad`, `Precio`, `Codigo`, `Ubicacion`, `Activo`, `Notas`, `Ult. Modificacion`).
+
+## Proveedores, pedidos y costos
+
+Los usuarios admin/dev tienen una pestana `PROVEEDORES` para crear viajantes, guardar pedidos en borrador y confirmar mercaderia ya recibida. Un borrador no modifica Stock. `Confirmar ingreso` registra en una sola operacion el aumento de stock, el movimiento de inventario, el historial de compra, el costo real y las revisiones de precio pendientes.
+
+El costo anterior desconocido se conserva como desconocido. El sistema separa:
+
+- ultimo costo o costo de reposicion, usado para sugerir precios futuros;
+- costo promedio ponderado del stock con costo real conocido;
+- cantidad de stock con costo conocido y desconocido.
+
+Los precios sugeridos nunca cambian Caja automaticamente. Se aprueban, editan o descartan desde `STOCK > Revision de precios`. Las anulaciones y correcciones de pedidos confirmados generan reversas y mantienen el original para auditoria.
+
+Las fotos de facturas se comprimen y se guardan fuera de la base, en `_data/invoices`, vinculadas permanentemente al pedido. Conviene copiar siempre la carpeta completa de la app para conservar datos y adjuntos.
+
+La caja sigue abriendose con `file://` para conservar el mismo origen de IndexedDB y no perder acceso a los datos existentes.
 
 ## Uso portable en laptop
 
-La forma mas liviana de usar la app en una PC vieja es copiar la carpeta `AppCajaPana` completa a la laptop y abrir:
+La forma mas liviana de usar la app en una PC vieja es copiar la carpeta completa a la laptop y abrir:
 
-`AppCajaPana.vbs`
+`LaViejaEsquina.exe`
 
-Ese launcher abre `Abrir-AppCajaPana.bat` sin mostrar consola, busca Chrome, Edge, Firefox o un navegador portable en `Browser\chrome.exe`, y usa un perfil local en `_perfil_caja` para que los datos de la caja queden separados del navegador personal.
+Ese launcher abre `Abrir-AppCajaPana.bat` sin mostrar consola, busca Chrome, Edge o un navegador portable en `Browser\chrome.exe`, y usa un perfil local en `_perfil_caja` para que los datos de la caja queden separados del navegador personal.
 
 Antes de abrir la app, el launcher revisa `update.json` en GitHub. Si encuentra una version mas nueva, descarga el ZIP, crea un backup en `_backups`, reemplaza los archivos de la app y despues abre la caja. Si no hay internet o GitHub falla, abre la version local igual.
 
@@ -27,23 +54,24 @@ Si la laptop solo tiene Internet Explorer, instalar un navegador compatible prim
 Usuarios iniciales sin contrasena:
 
 - `admin`
-- `dev`
 - `turno_manana`
 - `turno_tarde`
+
+El usuario `dev` tiene la clave tecnica configurada por el propietario.
 
 ## Incluye
 
 - Caja rapida con bloqueo anti doble venta.
 - Enter respeta el medio de pago seleccionado.
-- Atajos `E` para efectivo y `T` para transferencia.
+- Atajos `E` para efectivo y `Q` para QR.
 - Cierres, metricas, movimientos, actividad, usuarios y herramientas dev.
-- Nuevas secciones Mensual y Produccion.
+- Stock, Proveedores, Balance y Metricas con costos y cobertura de datos.
 - Modo opcional de canasta de productos.
 - Checker de updates en Dev: revisa `update.json` en GitHub al iniciar y ofrece descargar el ZIP del repo.
 
 ## Updates
 
-La app portable instala updates automaticamente cuando se abre con `AppCajaPana.vbs` o `Abrir-AppCajaPana.bat`.
+La app portable instala updates automaticamente cuando se abre con `LaViejaEsquina.exe` o `Abrir-AppCajaPana.bat`.
 
 Para forzar una instalacion manual en una terminal, cerrar la app y ejecutar:
 

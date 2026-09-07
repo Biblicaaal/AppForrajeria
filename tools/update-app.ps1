@@ -2,7 +2,7 @@ param(
   [switch]$WhatIf,
   [switch]$Auto,
   [switch]$Quiet,
-  [string]$Repo = "Biblicaaal/AppCajaPana",
+  [string]$Repo = "Biblicaaal/AppForrajeria",
   [string]$Branch = "main"
 )
 
@@ -131,7 +131,7 @@ try {
   New-Item -ItemType Directory -Path $TempRoot -Force | Out-Null
 
   Write-Step "Backing up current app"
-  Copy-DirectoryContents -Source $AppDir -Destination $BackupDir -Exclude @(".git", "_backups", "_perfil_caja", "Browser")
+  Copy-DirectoryContents -Source $AppDir -Destination $BackupDir -Exclude @(".git", "_backups", "_perfil_caja", "_data", "Browser")
 
   Write-Step "Downloading latest files"
   Invoke-WebRequest -Uri $ZipUrl -OutFile $ZipPath -UseBasicParsing
@@ -139,7 +139,7 @@ try {
   Write-Step "Extracting update"
   Expand-Archive -Path $ZipPath -DestinationPath $TempRoot -Force
   $ExtractedRoot = Get-ChildItem -LiteralPath $TempRoot -Directory | Where-Object {
-    $_.Name -like "AppCajaPana-*"
+    $_.Name -like "AppForrajeria-*" -or $_.Name -like "AppCajaPana-*"
   } | Select-Object -First 1
 
   if (-not $ExtractedRoot) {
@@ -147,18 +147,25 @@ try {
   }
 
   $SourceDir = $ExtractedRoot.FullName
-  $NestedAppDir = Join-Path $SourceDir "AppCajaPana"
+  $NestedAppDir = Join-Path $SourceDir "AppForrajeria"
+  if (-not (Test-Path -LiteralPath (Join-Path $NestedAppDir "index.html"))) {
+    $NestedAppDir = Join-Path $SourceDir "AppCajaPana"
+  }
   if ((Test-Path -LiteralPath $NestedAppDir) -and (Test-Path -LiteralPath (Join-Path $NestedAppDir "index.html"))) {
     $SourceDir = $NestedAppDir
   } elseif (-not (Test-Path -LiteralPath (Join-Path $SourceDir "index.html"))) {
-    throw "The downloaded update does not look like AppCajaPana. Missing index.html."
+    throw "The downloaded update does not look like AppForrajeria. Missing index.html."
   }
 
   Write-Step "Removing old app files"
-  Remove-UpdateableContents -Path $AppDir -Preserve @(".git", "_backups", "_perfil_caja", "Browser", "Update-AppCajaPana.bat", "Abrir-AppCajaPana.bat", "AppCajaPana.vbs", "Crear-Acceso-Directo.bat", "tools")
+  Remove-UpdateableContents -Path $AppDir -Preserve @(".git", "_backups", "_perfil_caja", "_data", "Browser", "Update-AppCajaPana.bat", "Abrir-AppCajaPana.bat", "LaViejaEsquina.exe", "AppCajaPana.vbs", "Crear-Acceso-Directo.bat", "tools")
 
   Write-Step "Installing update"
-  Copy-DirectoryContents -Source $SourceDir -Destination $AppDir -Exclude @(".git", "_backups")
+  Copy-DirectoryContents -Source $SourceDir -Destination $AppDir -Exclude @(".git", "_backups", "_perfil_caja", "_data", "Browser", "tools")
+  $SourceTools = Join-Path $SourceDir "tools"
+  if (Test-Path -LiteralPath $SourceTools) {
+    Copy-DirectoryContents -Source $SourceTools -Destination $ToolsDir
+  }
 
   Write-Step "Cleaning temporary files"
   Remove-Item -LiteralPath $TempRoot -Recurse -Force

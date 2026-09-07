@@ -17,7 +17,7 @@ serve(async (req) => {
   const supabase = createClient(supabaseUrl, serviceKey);
   const { data, error } = await supabase
     .from("mp_sales")
-    .select("external_reference,status,payment_id,approved_at,updated_at")
+    .select("external_reference,status,payment_id,order_id,payment_method_type,approved_at,updated_at")
     .in("external_reference", refs);
   if (error) return json({ error: error.message }, { status: 500 });
 

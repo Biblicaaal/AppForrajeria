@@ -1,2 +1,8 @@
 _backups/
 _perfil_caja/
+_data/
+tmp/
+.env
+.env.*
+supabase/functions/.env
+_update_last.log

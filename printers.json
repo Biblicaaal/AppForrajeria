@@ -1,7 +1,15 @@
 ﻿{
     "printers":  [
                      {
+                         "name":  "AnyDesk Printer",
+                         "default":  false
+                     },
+                     {
                          "name":  "Fax",
+                         "default":  false
+                     },
+                     {
+                         "name":  "HP Deskjet 3050 J610 series",
                          "default":  false
                      },
                      {
@@ -10,6 +18,10 @@
                      },
                      {
                          "name":  "Microsoft XPS Document Writer",
+                         "default":  false
+                     },
+                     {
+                         "name":  "OneNote (Desktop)",
                          "default":  false
                      },
                      {
@@ -25,5 +37,5 @@
                          "default":  true
                      }
                  ],
-    "generatedAt":  "2026-07-08T21:24:01"
+    "generatedAt":  "2026-09-07T08:12:46"
 }
