@@ -15,7 +15,7 @@ $ReportDir = Join-Path $DataDir "reports"
 $TokenPath = Join-Path $DataDir "local-token.txt"
 $PidPath = Join-Path $DataDir "local-server.pid"
 $SnapshotStores = @("users", "sessions", "transactions", "closures", "monthlyEntries", "productionItems", "products", "baskets", "basketItems", "settings", "auditLog")
-$OptionalSnapshotStores = @("masterProducts", "suppliers", "purchases", "purchaseLines", "inventoryMovements", "purchaseCostHistory", "priceReviews", "priceHistory")
+$OptionalSnapshotStores = @("masterProducts", "suppliers", "purchases", "purchaseLines", "inventoryMovements", "purchaseCostHistory", "priceReviews", "priceHistory", "mlCandidates", "mlResearch", "mlListings", "mlSyncEvents", "weatherDaily", "stockCountMissions", "stockCountResults", "stockCountCampaigns")
 New-Item -ItemType Directory -Path $DataDir -Force | Out-Null
 New-Item -ItemType Directory -Path $ArchiveDir -Force | Out-Null
 New-Item -ItemType Directory -Path $InvoiceDir -Force | Out-Null
@@ -113,7 +113,7 @@ function Read-HttpRequest {
   $contentLength = 0
   if ($headers.ContainsKey("Content-Length")) { $contentLength = [int]$headers["Content-Length"] }
   $requestTarget = [string]$requestParts[1]
-  $maxBodyLength = if ($requestTarget.StartsWith("/api/data-snapshot", [System.StringComparison]::OrdinalIgnoreCase)) { 64MB } elseif ($requestTarget.StartsWith("/api/invoice-attachment/", [System.StringComparison]::OrdinalIgnoreCase)) { 3MB } elseif ($requestTarget.StartsWith("/api/monthly-report", [System.StringComparison]::OrdinalIgnoreCase)) { 8MB } else { 70000 }
+  $maxBodyLength = if ($requestTarget.StartsWith("/api/data-snapshot", [System.StringComparison]::OrdinalIgnoreCase)) { 64MB } elseif ($requestTarget.StartsWith("/api/ml/images/", [System.StringComparison]::OrdinalIgnoreCase)) { 8MB } elseif ($requestTarget.StartsWith("/api/ml/publish", [System.StringComparison]::OrdinalIgnoreCase)) { 1MB } elseif ($requestTarget.StartsWith("/api/invoice-attachment/", [System.StringComparison]::OrdinalIgnoreCase)) { 3MB } elseif ($requestTarget.StartsWith("/api/monthly-report", [System.StringComparison]::OrdinalIgnoreCase)) { 8MB } else { 70000 }
   if ($contentLength -gt $maxBodyLength) { throw "Cuerpo demasiado grande" }
   $expectedLength = $headerLength + $contentLength
   while ($memory.Length -lt $expectedLength) {
@@ -220,6 +220,22 @@ function Save-MonthlyReport {
   return @{ ok=$true; file=$fileName; path=$reportPath; size=$contentBytes.Length }
 }
 
+function Get-LocalWeather {
+  param([string]$RequestTarget)
+  $requestUri = [uri]("http://127.0.0.1" + $RequestTarget)
+  $query = [System.Web.HttpUtility]::ParseQueryString($requestUri.Query)
+  $latitude = 0.0
+  $longitude = 0.0
+  if (-not [double]::TryParse([string]$query["latitude"], [Globalization.NumberStyles]::Float, [Globalization.CultureInfo]::InvariantCulture, [ref]$latitude)) { throw "Latitud invalida" }
+  if (-not [double]::TryParse([string]$query["longitude"], [Globalization.NumberStyles]::Float, [Globalization.CultureInfo]::InvariantCulture, [ref]$longitude)) { throw "Longitud invalida" }
+  if ($latitude -lt -90 -or $latitude -gt 90 -or $longitude -lt -180 -or $longitude -gt 180) { throw "Ubicacion fuera de rango" }
+  $lat = $latitude.ToString("0.###", [Globalization.CultureInfo]::InvariantCulture)
+  $lon = $longitude.ToString("0.###", [Globalization.CultureInfo]::InvariantCulture)
+  $url = "https://api.open-meteo.com/v1/forecast?latitude=$lat&longitude=$lon&current=temperature_2m%2Capparent_temperature%2Cweather_code%2Cprecipitation&hourly=temperature_2m%2Capparent_temperature%2Cweather_code%2Cprecipitation&daily=weather_code%2Ctemperature_2m_max%2Ctemperature_2m_min%2Cprecipitation_sum&timezone=auto&forecast_days=1"
+  $response = Invoke-RestMethod -Method Get -Uri $url -TimeoutSec 12 -Headers @{ "User-Agent" = "LaViejaEsquina-POS/1.0" }
+  return @{ current = $response.current; hourly = $response.hourly; daily = $response.daily; timezone = $response.timezone; utcOffsetSeconds = $response.utc_offset_seconds; latitude = [double]$lat; longitude = [double]$lon; provider = "Open-Meteo"; fetchedAt = (Get-Date).ToUniversalTime().ToString("o") }
+}
+
 function Save-InvoiceAttachment {
   param([string]$Id, [string]$Body)
   $paths = Get-InvoiceAttachmentPaths -Id $Id
@@ -253,6 +269,11 @@ function Save-InvoiceAttachment {
   return $metadata
 }
 
+$MercadoLibreServicePath = Join-Path $PSScriptRoot "mercado-libre-service.ps1"
+if (-not (Test-Path -LiteralPath $MercadoLibreServicePath)) { throw "Falta el servicio local de Mercado Libre" }
+. $MercadoLibreServicePath
+Initialize-MercadoLibreService
+
 [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]::Tls12
 $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, $Port)
 
@@ -280,6 +301,21 @@ try {
       if ($request.Method -eq "GET" -and $path -eq "/api/health") {
         Write-JsonResponse -Stream $stream -StatusCode 200 -Value @{ ok = $true; dataBackupAvailable = $true } -Origin $origin
         continue
+      }
+      if ($request.Method -eq "GET" -and $path -eq "/api/weather") {
+        if (-not (Test-SnapshotToken -Headers $request.Headers)) { Write-JsonResponse -Stream $stream -StatusCode 401 -Value @{ error = "Token local invalido" } -Origin $origin; continue }
+        try {
+          $weather = Get-LocalWeather -RequestTarget ([string]$request.Target)
+          Write-JsonResponse -Stream $stream -StatusCode 200 -Value $weather -Origin $origin
+        } catch {
+          if (-not $Quiet) { Write-Warning ("No se pudo consultar el clima: " + $_.Exception.Message) }
+          Write-JsonResponse -Stream $stream -StatusCode 502 -Value @{ error = "No se pudo consultar el clima" } -Origin $origin
+        }
+        continue
+      }
+      if ($path.StartsWith("/api/ml/", [System.StringComparison]::OrdinalIgnoreCase)) {
+        $handled = Invoke-MercadoLibreRoute -Request $request -Path $path -Stream $stream -Origin $origin
+        if ($handled) { continue }
       }
       if ($path -eq "/api/monthly-report") {
         if (-not (Test-SnapshotToken -Headers $request.Headers)) { Write-JsonResponse -Stream $stream -StatusCode 401 -Value @{ error = "Token local invalido" } -Origin $origin; continue }

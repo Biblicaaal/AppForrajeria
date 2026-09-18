@@ -2,8 +2,8 @@
   "use strict";
 
   var DB_NAME = "forrajeria_caja_static_v1";
-  var DB_VERSION = 3;
-  var APP_VERSION = "2026.08.29.1";
+  var DB_VERSION = 6;
+  var APP_VERSION = "2026.09.17.2";
   var APP_REPO = "Biblicaaal/AppForrajeria";
   var APP_BRANCH = "main";
   var UPDATE_MANIFEST_URL = "https://raw.githubusercontent.com/" + APP_REPO + "/" + APP_BRANCH + "/update.json";
@@ -11,7 +11,10 @@
   var UPDATE_REPO_URL = "https://github.com/" + APP_REPO;
   var CORE_STORES = ["users", "sessions", "transactions", "closures", "monthlyEntries", "productionItems", "products", "masterProducts", "baskets", "basketItems", "settings", "auditLog"];
   var PURCHASING_STORES = ["suppliers", "purchases", "purchaseLines", "inventoryMovements", "purchaseCostHistory", "priceReviews", "priceHistory"];
-  var STORES = CORE_STORES.concat(PURCHASING_STORES);
+  var MERCADO_LIBRE_STORES = ["mlCandidates", "mlResearch", "mlListings", "mlSyncEvents"];
+  var CONTEXT_STORES = ["weatherDaily"];
+  var STOCK_COUNT_STORES = ["stockCountMissions", "stockCountResults", "stockCountCampaigns"];
+  var STORES = CORE_STORES.concat(PURCHASING_STORES, MERCADO_LIBRE_STORES, CONTEXT_STORES, STOCK_COUNT_STORES);
   var CLEAN_SLATE_VERSION = "2026-08-07-production-clean-1";
   var CLEAN_SLATE_STORAGE_KEY = "forrajeriaCleanSlateVersion";
   var LOCAL_DATA_ENDPOINT = "http://127.0.0.1:4174/api/data-snapshot";
@@ -32,11 +35,14 @@
   var currentTab = "Caja";
   var isSubmittingSale = false;
   var isLoggingIn = false;
+  var devAutoLoginTimer = null;
   var isGeneratingTestData = false;
   var saleMode = "quick";
   var basket = [];
+  var ticketDiscount = { type: "percent", value: 0 };
   var calcItems = [];
   var selectedProduct = null;
+  var productEntryMode = "quantity";
   var lastReceipt = null;
   var scannerBuffer = "";
   var scannerLastKeyAt = 0;
@@ -108,6 +114,10 @@
   var MOVEMENT_BATCH_SIZE = 80;
   var monthlyPhotoData = "";
   var dateSyncTimer = null;
+  var weatherSyncTimer = null;
+  var stockCountRenderSequence = 0;
+  var activeStockCountMission = null;
+  var isRequestingStockCountMission = false;
   var selectedBalanceDay = "";
   var balanceEntryFilter = "all";
   var expandedBalanceEntries = {};
@@ -127,7 +137,7 @@
   var purchaseSelectedDetail = null;
   var supplierSelectedProfile = null;
   var quickButtons = [500, 1000, 1500, 2000, 2500, 3000, 4000, 5000, 8000, 10000];
-  var monthlyCategories = ["Proveedores", "Sueldos", "Alquiler", "Servicios", "Arreglos", "Equipamiento", "Insumos", "Otro"];
+  var monthlyCategories = ["Proveedores", "Perdida", "Sueldos", "Alquiler", "Servicios", "Arreglos", "Equipamiento", "Insumos", "Otro"];
   var catalogProducts = Array.isArray(window.FORRAJERIA_CATALOG) ? window.FORRAJERIA_CATALOG : [];
   var catalogVersion = window.FORRAJERIA_CATALOG_VERSION || "catalog-missing";
 
@@ -262,10 +272,27 @@
       roundingAdjustment: moneyPrecision(total - unroundedAmount)
     };
   }
-  function basketSaleAmounts(items) {
-    return saleAmounts((items || []).reduce(function (total, item) {
+  function basketSaleAmounts(items, discountOverride) {
+    var grossSubtotal = moneyPrecision((items || []).reduce(function (total, item) {
       return total + Number(item.subtotal || 0);
     }, 0));
+    var effectiveDiscount = arguments.length > 1 ? (discountOverride || {}) : ticketDiscount;
+    var discountType = effectiveDiscount && effectiveDiscount.type === "fixed" ? "fixed" : "percent";
+    var discountValue = Math.max(0, Number(effectiveDiscount && effectiveDiscount.value || 0));
+    if (!isFinite(discountValue)) discountValue = 0;
+    if (discountType === "percent") discountValue = Math.min(100, discountValue);
+    var discountAmount = discountType === "fixed" ? discountValue : grossSubtotal * discountValue / 100;
+    discountAmount = moneyPrecision(Math.min(grossSubtotal, Math.max(0, discountAmount)));
+    var amounts = saleAmounts(Math.max(0, grossSubtotal - discountAmount));
+    amounts.grossSubtotal = grossSubtotal;
+    amounts.discountType = discountType;
+    amounts.discountValue = moneyPrecision(discountValue);
+    amounts.discountAmount = discountAmount;
+    return amounts;
+  }
+  function resetTicketDiscount() {
+    ticketDiscount = { type: "percent", value: 0 };
+    if ($("ticketDiscountValue")) $("ticketDiscountValue").value = "";
   }
   function escapeHtml(v) {
     return String(v == null ? "" : v).replace(/[&<>"']/g, function (ch) {
@@ -657,6 +684,217 @@
     var headers = Object.assign({}, options.headers || {}, { "X-App-Token": localDataToken });
     return fetch(LOCAL_DATA_ENDPOINT + (path || ""), Object.assign({}, options, { headers: headers, cache: "no-store" }));
   }
+  function mercadoLibreRequest(path, options) {
+    path = String(path || "");
+    if (!/^\/[A-Za-z0-9_?&=.%\/-]*$/.test(path)) return Promise.reject(new Error("Ruta de Mercado Libre invalida"));
+    options = options || {};
+    var headers = Object.assign({}, options.headers || {}, { "X-App-Token": localDataToken });
+    return fetch("http://127.0.0.1:4174/api/ml" + path, Object.assign({}, options, { headers: headers, cache: "no-store" }));
+  }
+  function weatherSettings() {
+    try { return JSON.parse(localStorage.getItem("forrajeriaWeatherSettings") || "{}"); }
+    catch (error) { return {}; }
+  }
+  function weatherHourlyCondition(code, precipitation) {
+    code = Number(code);
+    precipitation = Math.max(0, Number(precipitation || 0));
+    if ([95, 96, 99].indexOf(code) >= 0) return { group: "Tormenta", label: "Tormenta" };
+    if ([71, 73, 75, 77, 85, 86].indexOf(code) >= 0) return { group: "Nieve", label: "Nieve" };
+    if (precipitation >= .1 || [51, 53, 55, 56, 57, 61, 63, 65, 66, 67, 80, 81, 82].indexOf(code) >= 0) return { group: "Lluvioso", label: "Lluvia" };
+    if (code === 45 || code === 48) return { group: "Niebla", label: "Niebla" };
+    if (code === 0 || code === 1) return { group: "Soleado", label: code === 0 ? "Despejado" : "Mayormente soleado" };
+    if (code === 2 || code === 3) return { group: "Nublado", label: code === 2 ? "Parcialmente nublado" : "Nublado" };
+    return { group: "Variable", label: "Clima variable" };
+  }
+  function weatherDescription(code) {
+    return weatherHourlyCondition(code, 0).label;
+  }
+  function weatherConditionGroup(code, precipitation) {
+    return weatherHourlyCondition(code, precipitation).group;
+  }
+  function weatherFiniteValues(values) {
+    return (values || []).map(Number).filter(function (value) { return isFinite(value); });
+  }
+  function weatherAverage(values) {
+    values = weatherFiniteValues(values);
+    return values.length ? values.reduce(function (sumValue, value) { return sumValue + value; }, 0) / values.length : null;
+  }
+  function weatherMedian(values) {
+    values = weatherFiniteValues(values).sort(function (a, b) { return a - b; });
+    if (!values.length) return null;
+    var middle = Math.floor(values.length / 2);
+    return values.length % 2 ? values[middle] : (values[middle - 1] + values[middle]) / 2;
+  }
+  function weatherTemperatureBand(average, median) {
+    average = Number(average); median = Number(median);
+    if (!isFinite(average)) average = median;
+    if (!isFinite(median)) median = average;
+    if (!isFinite(average) || !isFinite(median)) return "Sin clasificar";
+    var center = (average + median) / 2;
+    if (center < 7) return "Muy frio";
+    if (center < 14) return "Frio";
+    if (center >= 32) return "Muy caluroso";
+    if (center >= 25) return "Caluroso";
+    return "Normal";
+  }
+  function weatherCodeSeverity(code) {
+    var group = weatherConditionGroup(code, 0);
+    return { Variable: 0, Soleado: 1, Nublado: 2, Niebla: 3, Lluvioso: 4, Nieve: 5, Tormenta: 6 }[group] || 0;
+  }
+  function weatherDaySummary(observations, fallbackCode, fallbackPrecipitation) {
+    var rows = observations && observations.length ? observations : [{
+      weatherCode: Number(fallbackCode || 0),
+      precipitation: Number(fallbackPrecipitation || 0),
+      conditionGroup: weatherConditionGroup(fallbackCode, fallbackPrecipitation)
+    }];
+    var counts = { Soleado: 0, Nublado: 0, Niebla: 0, Lluvioso: 0, Nieve: 0, Tormenta: 0, Variable: 0 };
+    var exactCodes = {};
+    rows.forEach(function (row) {
+      var group = row.conditionGroup || weatherConditionGroup(row.weatherCode, row.precipitation);
+      counts[group] = Number(counts[group] || 0) + 1;
+      var codeKey = String(Number(row.weatherCode || 0));
+      exactCodes[codeKey] = Number(exactCodes[codeKey] || 0) + 1;
+    });
+    var total = rows.length;
+    var priority = { Tormenta: 7, Lluvioso: 6, Nieve: 5, Niebla: 4, Nublado: 3, Soleado: 2, Variable: 1 };
+    var dominant = Object.keys(counts).sort(function (a, b) { return counts[b] - counts[a] || priority[b] - priority[a]; })[0];
+    var wetHours = counts.Lluvioso + counts.Nieve;
+    var stormThreshold = Math.max(2, Math.ceil(total * .2));
+    var rainThreshold = Math.max(3, Math.ceil(total * .3));
+    var group = dominant;
+    if (counts.Tormenta >= stormThreshold) group = "Tormenta";
+    else if (wetHours >= rainThreshold) group = counts.Nieve > counts.Lluvioso ? "Nieve" : "Lluvioso";
+    else if (counts.Soleado / total >= .55) group = "Soleado";
+    else if ((counts.Nublado + counts.Niebla) / total >= .5) group = "Nublado";
+    var descriptions = { Soleado: "Soleado", Nublado: "Nublado", Niebla: "Con niebla", Lluvioso: "Lluvioso", Nieve: "Con nieve", Tormenta: "Tormentas", Variable: "Clima variable" };
+    var description = descriptions[group] || group;
+    if (group === "Lluvioso" && counts.Tormenta) description = "Lluvioso con tormentas";
+    else if (group !== "Tormenta" && counts.Tormenta) description += " con tormenta aislada";
+    else if (["Lluvioso", "Nieve"].indexOf(group) < 0 && wetHours) description += " con lluvia aislada";
+    var representativeCode = Number(Object.keys(exactCodes).sort(function (a, b) {
+      return exactCodes[b] - exactCodes[a] || weatherCodeSeverity(Number(b)) - weatherCodeSeverity(Number(a));
+    })[0] || fallbackCode || 0);
+    var severeCode = rows.reduce(function (selected, row) {
+      return weatherCodeSeverity(row.weatherCode) > weatherCodeSeverity(selected) ? Number(row.weatherCode) : selected;
+    }, representativeCode);
+    return {
+      conditionGroup: group,
+      description: description,
+      conditionCounts: counts,
+      dominantShare: total ? Number((counts[dominant] / total).toFixed(3)) : 0,
+      representativeWeatherCode: representativeCode,
+      mostSevereWeatherCode: severeCode
+    };
+  }
+  function weatherSymbol(group) {
+    if (group === "Tormenta") return "⚡";
+    if (group === "Lluvioso") return "☂";
+    if (group === "Soleado") return "☀";
+    if (group === "Nieve") return "❄";
+    if (group === "Niebla") return "≋";
+    return "☁";
+  }
+  function saveWeatherPayload(payload, settings) {
+    var daily = payload && payload.daily || {}, hourly = payload && payload.hourly || {}, current = payload && payload.current || {};
+    var date = String(daily.time && daily.time[0] || current.time || hourly.time && hourly.time[0] || today()).slice(0, 10);
+    var currentLocalTime = String(current.time || "");
+    var currentLocalDate = currentLocalTime.slice(0, 10) || date;
+    var currentLocalHour = Number(currentLocalTime.slice(11, 13));
+    if (!isFinite(currentLocalHour)) currentLocalHour = date === today() ? new Date().getHours() : 23;
+    var observations = (hourly.time || []).map(function (timeValue, index) {
+      var time = String(timeValue || ""), hour = Number(time.slice(11, 13));
+      var weatherCode = Number(hourly.weather_code && hourly.weather_code[index]);
+      var precipitation = Math.max(0, Number(hourly.precipitation && hourly.precipitation[index] || 0));
+      var condition = weatherHourlyCondition(weatherCode, precipitation);
+      return {
+        time: time,
+        hour: hour,
+        temperature: Number(hourly.temperature_2m && hourly.temperature_2m[index]),
+        apparentTemperature: Number(hourly.apparent_temperature && hourly.apparent_temperature[index]),
+        weatherCode: weatherCode,
+        precipitation: precipitation,
+        conditionGroup: condition.group,
+        description: condition.label
+      };
+    }).filter(function (row) {
+      var rowDate = row.time.slice(0, 10);
+      return rowDate === date && row.hour >= 6 && row.hour <= 22 && (rowDate < currentLocalDate || rowDate === currentLocalDate && row.hour <= currentLocalHour);
+    });
+    var temperatures = weatherFiniteValues(observations.map(function (row) { return row.temperature; }));
+    var apparentTemperatures = weatherFiniteValues(observations.map(function (row) { return row.apparentTemperature; }));
+    var average = weatherAverage(temperatures);
+    var median = weatherMedian(temperatures);
+    var apparentAverage = weatherAverage(apparentTemperatures);
+    var apparentMedian = weatherMedian(apparentTemperatures);
+    var dailyMaximum = Number(daily.temperature_2m_max && daily.temperature_2m_max[0]);
+    var dailyMinimum = Number(daily.temperature_2m_min && daily.temperature_2m_min[0]);
+    var maximum = temperatures.length ? Math.max.apply(Math, temperatures) : dailyMaximum;
+    var minimum = temperatures.length ? Math.min.apply(Math, temperatures) : dailyMinimum;
+    if (!isFinite(average)) average = isFinite(maximum) && isFinite(minimum) ? (maximum + minimum) / 2 : Number(current.temperature_2m);
+    if (!isFinite(median)) median = average;
+    if (!isFinite(apparentAverage)) apparentAverage = Number(current.apparent_temperature);
+    if (!isFinite(apparentMedian)) apparentMedian = apparentAverage;
+    var hourlyPrecipitation = observations.reduce(function (total, row) { return total + Number(row.precipitation || 0); }, 0);
+    var precipitation = observations.length ? hourlyPrecipitation : Number(daily.precipitation_sum && daily.precipitation_sum[0] || current.precipitation || 0);
+    var fallbackCode = Number(daily.weather_code && daily.weather_code[0]);
+    if (!isFinite(fallbackCode)) fallbackCode = Number(current.weather_code || 0);
+    var summary = weatherDaySummary(observations, fallbackCode, precipitation);
+    var rainRows = observations.filter(function (row) { return row.conditionGroup === "Lluvioso" || row.conditionGroup === "Tormenta"; });
+    var stormRows = observations.filter(function (row) { return row.conditionGroup === "Tormenta"; });
+    var record = {
+      id: "weather-" + date, date: date, weatherCode: summary.representativeWeatherCode, mostSevereWeatherCode: summary.mostSevereWeatherCode,
+      description: summary.description, conditionGroup: summary.conditionGroup, conditionCounts: summary.conditionCounts, dominantShare: summary.dominantShare,
+      temperatureBand: weatherTemperatureBand(average, median), temperatureAverage: moneyPrecision(average), temperatureMedian: moneyPrecision(median),
+      apparentTemperatureAverage: moneyPrecision(apparentAverage), apparentTemperatureMedian: moneyPrecision(apparentMedian),
+      temperatureCurrent: Number(current.temperature_2m), apparentTemperature: Number(current.apparent_temperature),
+      temperatureMax: maximum, temperatureMin: minimum, forecastTemperatureMax: dailyMaximum, forecastTemperatureMin: dailyMinimum,
+      precipitation: moneyPrecision(precipitation), rainHours: rainRows.map(function (row) { return row.time; }), stormHours: stormRows.map(function (row) { return row.time; }),
+      hoursObserved: observations.length, hourWindow: "06:00-22:00", hourlyObservations: observations,
+      latitude: Number(settings.latitude), longitude: Number(settings.longitude), timezone: payload.timezone || "",
+      provider: "Open-Meteo", attributionUrl: "https://open-meteo.com/", analysisMethod: "Moda horaria con umbrales de lluvia/tormenta; temperatura por promedio y mediana",
+      observedAt: payload.fetchedAt || nowIso(), updatedAt: nowIso()
+    };
+    return add("weatherDaily", record).then(function () { scheduleDiskSnapshot(); return record; });
+  }
+  function syncTodayWeather(silent) {
+    var settings = weatherSettings();
+    if (!isFinite(Number(settings.latitude)) || !isFinite(Number(settings.longitude))) return Promise.resolve(null);
+    return all("weatherDaily").then(function (rows) {
+      var existing = rows.filter(function (row) { return row.date === today(); })[0];
+      if (existing && Array.isArray(existing.hourlyObservations) && existing.hourlyObservations.length && Date.now() - new Date(existing.updatedAt || existing.observedAt || 0).getTime() < 55 * 60 * 1000) return existing;
+      if (!localDataToken || !diskSnapshotServiceReady) throw new Error("El servicio local no esta listo");
+      var url = "http://127.0.0.1:4174/api/weather?latitude=" + encodeURIComponent(Number(settings.latitude).toFixed(3)) + "&longitude=" + encodeURIComponent(Number(settings.longitude).toFixed(3));
+      return fetch(url, { cache: "no-store", headers: { "X-App-Token": localDataToken } }).then(function (response) {
+        return response.json().catch(function () { return {}; }).then(function (body) { if (!response.ok) throw new Error(body.error || "No se pudo consultar el clima"); return body; });
+      }).then(function (payload) { return saveWeatherPayload(payload, settings); });
+    }).then(function (record) {
+      if (!silent && record) toast("Clima del dia guardado: " + record.description);
+      if (currentTab === "Metricas") renderMetrics();
+      if (currentTab === "Balance") renderMonthly();
+      return record;
+    }).catch(function (error) {
+      if (!silent) toast(error && error.message || "No se pudo guardar el clima");
+      return null;
+    });
+  }
+  function startWeatherSync() {
+    clearInterval(weatherSyncTimer);
+    weatherSyncTimer = setInterval(function () { syncTodayWeather(true); }, 60 * 60 * 1000);
+  }
+  function requestPcWeatherLocation() {
+    if (!isAdmin()) return;
+    if (!navigator.geolocation) { toast("Esta PC no permite obtener ubicacion"); return; }
+    var button = $("weatherLocationBtn");
+    if (button) { button.disabled = true; button.textContent = "Obteniendo ubicacion..."; }
+    navigator.geolocation.getCurrentPosition(function (position) {
+      var settings = { latitude: Math.round(position.coords.latitude * 1000) / 1000, longitude: Math.round(position.coords.longitude * 1000) / 1000, configuredAt: nowIso() };
+      localStorage.setItem("forrajeriaWeatherSettings", JSON.stringify(settings));
+      syncTodayWeather(false).then(function () { if (button) { button.disabled = false; button.textContent = "Actualizar ubicacion"; } });
+    }, function () {
+      if (button) { button.disabled = false; button.textContent = "Usar ubicacion de esta PC"; }
+      toast("No se autorizo la ubicacion de esta PC");
+    }, { enableHighAccuracy: false, timeout: 12000, maximumAge: 86400000 });
+  }
   function purchaseStoreAttachment(id, attachment) {
     id = String(id || "");
     if (!/^[A-Za-z0-9_-]{6,80}$/.test(id)) return Promise.reject(new Error("Identificador unico de factura invalido"));
@@ -679,7 +917,7 @@
     var legacyRequiredStores = CORE_STORES.filter(function (store) { return store !== "masterProducts"; });
     return legacyRequiredStores.every(function (store) {
       return Array.isArray(snapshot.stores[store]) && snapshot.stores[store].every(function (record) { return record && record.id != null; });
-    }) && ["masterProducts"].concat(PURCHASING_STORES).every(function (store) {
+    }) && ["masterProducts"].concat(PURCHASING_STORES, MERCADO_LIBRE_STORES, CONTEXT_STORES, STOCK_COUNT_STORES).every(function (store) {
       return snapshot.stores[store] == null || (Array.isArray(snapshot.stores[store]) && snapshot.stores[store].every(function (record) { return record && record.id != null; }));
     });
   }
@@ -879,6 +1117,30 @@
       severity: severity || "normal"
     });
   }
+  function commitMercadoLibrePublication(candidate, listing, warning) {
+    if (!isAdmin()) return Promise.reject(new Error("Solo admin/dev"));
+    return dbPromise.then(function (db) {
+      return new Promise(function (resolve, reject) {
+        var stamp = nowIso();
+        var transaction = db.transaction(["mlCandidates", "mlListings", "mlSyncEvents", "auditLog"], "readwrite");
+        transaction.objectStore("mlCandidates").put(candidate);
+        transaction.objectStore("mlListings").put(listing);
+        transaction.objectStore("mlSyncEvents").put({
+          id: uid(), candidateId: candidate.id, listingId: listing.id, mlItemId: listing.mlItemId,
+          type: warning ? "PUBLISH_PARTIAL" : "PUBLISHED", detail: warning || "Publicacion creada",
+          createdAt: stamp, createdBy: currentUser && currentUser.id
+        });
+        transaction.objectStore("auditLog").put({
+          id: uid(), createdAt: stamp, userId: currentUser && currentUser.id,
+          username: currentUser && currentUser.username, action: warning ? "ML_PUBLISH_PARTIAL" : "ML_PUBLISHED",
+          detail: listing.mlItemId + (warning ? " · " + warning : ""), severity: warning ? "critical" : "important"
+        });
+        transaction.oncomplete = function () { scheduleDiskSnapshot(); resolve({ candidate: candidate, listing: listing }); };
+        transaction.onerror = function () { reject(transaction.error); };
+        transaction.onabort = function () { reject(transaction.error || new Error("No se pudo guardar el ID de Mercado Libre")); };
+      });
+    });
+  }
 
   function productCostPools(product) {
     var stock = Math.max(0, Number(product.stock || 0));
@@ -926,7 +1188,10 @@
       l.baseCostPerSaleUnit = l.totalSaleQuantity > 0 ? moneyPrecision(base / l.totalSaleQuantity) : 0;
       l.landedLineCost = moneyPrecision(base + adjustment * ratio); if(l.landedLineCost<0)throw new Error("El costo final de una linea no puede ser negativo"); l.costPerSaleUnit = l.totalSaleQuantity > 0 ? moneyPrecision(l.landedLineCost / l.totalSaleQuantity) : 0;
     });
-    purchase.subtotal = moneyPrecision(lines.reduce(function (s,l) { return s + l.grossSubtotal; }, 0)); purchase.total = moneyPrecision(purchase.subtotal - Number(purchase.discounts || 0) + Number(purchase.freight || 0) + Number(purchase.taxes || 0) + Number(purchase.otherCosts || 0));
+    purchase.subtotal = moneyPrecision(lines.reduce(function (s,l) { return s + l.grossSubtotal; }, 0));
+    purchase.lineDiscountTotal = moneyPrecision(lines.reduce(function (s,l) { return s + Number(l.lineDiscount || 0); }, 0));
+    purchase.netProductsTotal = moneyPrecision(purchase.subtotal - purchase.lineDiscountTotal);
+    purchase.total = moneyPrecision(purchase.netProductsTotal - Number(purchase.discounts || 0) + Number(purchase.freight || 0) + Number(purchase.taxes || 0) + Number(purchase.otherCosts || 0));
     if (purchase.total < 0) throw new Error("El total final de factura no puede ser negativo");
     if (paid <= 0 && Math.abs(purchase.total) > .009) {
       var quantityTotal=lines.reduce(function(sum,line){return sum+Number(line.totalSaleQuantity||0);},0);if(quantityTotal<=0)throw new Error("No se pueden distribuir costos sin cantidades");
@@ -1082,6 +1347,17 @@
     });
     return writes;
   }
+  function purchaseBalanceEntry(purchase, stamp, entryId) {
+    var supplierName = purchase && purchase.supplierSnapshot && purchase.supplierSnapshot.name || "Proveedor";
+    return {
+      id: entryId || ("purchase-expense-" + purchase.id), type: "EXPENSE", date: localDateKey(new Date(stamp || nowIso())),
+      amount: moneyPrecision(Number(purchase && purchase.total || 0)), category: "Compra a proveedor",
+      description: supplierName + (purchase && purchase.invoiceNumber ? " · Factura " + purchase.invoiceNumber : ""),
+      paymentMethod: purchase && purchase.paymentTerms || "Proveedor", recurring: false,
+      sourceType: "PURCHASE", sourcePurchaseId: purchase.id, automatic: true,
+      createdBy: currentUser && currentUser.id, createdAt: stamp || nowIso()
+    };
+  }
   function purchaseConfirm(purchaseId) {
     if (!isAdmin()) return Promise.reject(new Error("Solo admin/dev"));
     return Promise.all([all("purchases"), all("purchaseLines"), all("products"), all("suppliers"), all("priceReviews")]).then(function (sets) {
@@ -1113,8 +1389,15 @@
       });
       var reviewWrites = [];
       purchase.status = "CONFIRMED"; purchase.confirmedAt = stamp; purchase.confirmedBy = currentUser.id; purchase.updatedAt = stamp;
+      var balanceEntry = null;
+      if (Number(purchase.total || 0) > 0) {
+        purchase.balanceEntryId = "purchase-expense-" + purchase.id;
+        balanceEntry = purchaseBalanceEntry(purchase, stamp, purchase.balanceEntryId);
+      } else {
+        delete purchase.balanceEntryId;
+      }
       return dbPromise.then(function (db) { return new Promise(function (resolve, reject) {
-        var names = ["purchases","purchaseLines","products","suppliers","inventoryMovements","purchaseCostHistory","priceReviews","auditLog"], transaction = db.transaction(names, "readwrite"), purchaseStore = transaction.objectStore("purchases"), lineStore = transaction.objectStore("purchaseLines");
+        var names = ["purchases","purchaseLines","products","suppliers","inventoryMovements","purchaseCostHistory","priceReviews","monthlyEntries","auditLog"], transaction = db.transaction(names, "readwrite"), purchaseStore = transaction.objectStore("purchases"), lineStore = transaction.objectStore("purchaseLines");
         var productIds = Object.keys(affected), pendingChecks = 4 + productIds.length, abortMessage = "";
         function finishCheck() {
           pendingChecks -= 1; if (pendingChecks > 0) return;
@@ -1122,6 +1405,7 @@
           purchaseStore.put(purchase); lines.forEach(function (line) { lineStore.put(line); });
           productIds.forEach(function (productId) { transaction.objectStore("products").put(products[productId]); });
           movements.forEach(function (movement) { transaction.objectStore("inventoryMovements").put(movement); }); history.forEach(function (row) { transaction.objectStore("purchaseCostHistory").put(row); }); reviewWrites.forEach(function (review) { transaction.objectStore("priceReviews").put(review); });
+          if (balanceEntry) transaction.objectStore("monthlyEntries").put(balanceEntry);
           transaction.objectStore("auditLog").put({ id: uid(), createdAt: stamp, userId: currentUser.id, username: currentUser.username, action: "PURCHASE_CONFIRMED", detail: purchase.id, severity: "warning" });
         }
         var purchaseCheck = purchaseStore.get(purchase.id);
@@ -1188,12 +1472,13 @@
       purchase.status = "VOIDED"; purchase.voidedAt = stamp; purchase.voidedBy = currentUser.id; purchase.voidReason = reason; purchase.updatedAt = stamp;
       var reviewWrites = [];
       return dbPromise.then(function (db) { return new Promise(function (resolve, reject) {
-        var names = ["purchases","products","inventoryMovements","purchaseCostHistory","priceReviews","auditLog"], transaction = db.transaction(names,"readwrite"), purchaseStore = transaction.objectStore("purchases");
+        var names = ["purchases","products","inventoryMovements","purchaseCostHistory","priceReviews","monthlyEntries","auditLog"], transaction = db.transaction(names,"readwrite"), purchaseStore = transaction.objectStore("purchases");
         var productIds = Object.keys(affected), pendingChecks = 2 + productIds.length, abortMessage = "";
         function finishCheck() {
           pendingChecks -= 1; if (pendingChecks > 0) return;
           if (abortMessage) { transaction.abort(); return; }
           purchaseStore.put(purchase); productIds.forEach(function (productId) { transaction.objectStore("products").put(products[productId]); });
+          if (priorStatus === "CONFIRMED" && purchase.balanceEntryId) transaction.objectStore("monthlyEntries").delete(purchase.balanceEntryId);
           reversals.forEach(function (movement) { transaction.objectStore("inventoryMovements").put(movement); }); histories.forEach(function (row) { transaction.objectStore("purchaseCostHistory").put(row); }); reviewWrites.forEach(function (review) { transaction.objectStore("priceReviews").put(review); });
           transaction.objectStore("auditLog").put({ id: uid(), createdAt: stamp, userId: currentUser.id, username: currentUser.username, action: priorStatus === "CONFIRMED" ? "PURCHASE_VOIDED" : "PURCHASE_DRAFT_VOIDED", detail: id + " | " + reason, severity: "critical" });
         }
@@ -1273,16 +1558,23 @@
         movements.push({ id: uid(), type: "PURCHASE_CORRECTION_RECEIPT", lineSequence: sequence, productId: product.id, quantity: Number(line.totalSaleQuantity), knownCostQuantity: Number(line.totalSaleQuantity), knownCostValue: Number(line.landedLineCost || 0), unitCost: line.costPerSaleUnit, referenceType: "PURCHASE_CORRECTION", referenceId: replacement.id, referenceLineId: line.id, beforeState: applied.beforeState, afterState: applied.afterState, createdAt: stamp, createdBy: currentUser.id });
         histories.push({ id: uid(), type: "PURCHASE_CORRECTION_CONFIRMED", purchaseId: replacement.id, correctsPurchaseId: id, purchaseLineId: line.id, productId: product.id, productName: product.name, supplierId: replacement.supplierId, supplierName: replacement.supplierSnapshot.name, quantity: line.totalSaleQuantity, baseCostPerSaleUnit: line.baseCostPerSaleUnit, costPerSaleUnit: line.costPerSaleUnit, landedLineCost: line.landedLineCost, reason: reason, createdAt: stamp, createdBy: currentUser.id });
       });
+      var correctedBalanceEntry = null;
+      if (original.balanceEntryId) {
+        replacement.balanceEntryId = original.balanceEntryId;
+        correctedBalanceEntry = purchaseBalanceEntry(replacement, stamp, original.balanceEntryId);
+        if (original.confirmedAt) correctedBalanceEntry.date = localDateKey(new Date(original.confirmedAt));
+      }
       original.status = "VOIDED"; original.voidedAt = stamp; original.voidedBy = currentUser.id; original.voidReason = reason; original.correctedByPurchaseId = replacement.id; original.updatedAt = stamp;
       var reviewWrites = [];
       return dbPromise.then(function (db) { return new Promise(function (resolve, reject) {
-        var names = ["purchases", "purchaseLines", "products", "suppliers", "inventoryMovements", "purchaseCostHistory", "priceReviews", "auditLog"], transaction = db.transaction(names, "readwrite"), purchaseStore = transaction.objectStore("purchases");
+        var names = ["purchases", "purchaseLines", "products", "suppliers", "inventoryMovements", "purchaseCostHistory", "priceReviews", "monthlyEntries", "auditLog"], transaction = db.transaction(names, "readwrite"), purchaseStore = transaction.objectStore("purchases");
         var productIds = Object.keys(affected), pendingChecks = 5 + productIds.length, abortMessage = "";
         function finishCheck() {
           pendingChecks -= 1; if (pendingChecks > 0) return;
           if (abortMessage) { transaction.abort(); return; }
           purchaseStore.put(original); purchaseStore.put(replacement); staleReplacementLines.forEach(function (line) { transaction.objectStore("purchaseLines").delete(line.id); }); correctedLines.forEach(function (line) { transaction.objectStore("purchaseLines").put(line); });
           productIds.forEach(function (productId) { transaction.objectStore("products").put(products[productId]); }); movements.forEach(function (movement) { transaction.objectStore("inventoryMovements").put(movement); }); histories.forEach(function (history) { transaction.objectStore("purchaseCostHistory").put(history); }); reviewWrites.forEach(function (review) { transaction.objectStore("priceReviews").put(review); });
+          if (correctedBalanceEntry) transaction.objectStore("monthlyEntries").put(correctedBalanceEntry);
           transaction.objectStore("auditLog").put({ id: uid(), createdAt: stamp, userId: currentUser.id, username: currentUser.username, action: "PURCHASE_CORRECTED", detail: id + " -> " + replacement.id + " | " + reason, severity: "critical" });
         }
         var statusCheck = purchaseStore.get(id); statusCheck.onsuccess = function () { if (!statusCheck.result || statusCheck.result.status !== "CONFIRMED" || String(statusCheck.result.updatedAt || "") !== originalUpdatedAt) abortMessage = "El pedido original cambio o ya fue procesado"; finishCheck(); };
@@ -1411,7 +1703,7 @@
     if (!select) return Promise.resolve();
     var previous = preferredUsername || select.value || "turno_manana";
     return all("users").then(function (users) {
-      users = users.filter(function (u) { return u.active !== false; });
+      users = users.filter(function (u) { return u.active !== false && u.role !== "dev" && u.username !== "dev"; });
       users.sort(function (a, b) {
         var order = { turno_manana: 0, turno_tarde: 1, admin: 2, dev: 3 };
         var ao = order[a.username] == null ? 10 : order[a.username];
@@ -1450,10 +1742,10 @@
     }).catch(function () { return null; });
   }
 
-  function login(e) {
+  function login(e, forcedUsername) {
     if (e && e.preventDefault) e.preventDefault();
     if (isLoggingIn) return;
-    var username = $("loginUser").value.trim();
+    var username = String(forcedUsername || $("loginUser").value || "").trim();
     var pass = $("loginPass").value.trim();
     setLoginStatus("");
     if (!username) { setLoginStatus("Seleccione usuario", "warn"); return; }
@@ -1467,6 +1759,12 @@
       }
     }, 7000);
     all("users").then(function (users) {
+      if (!forcedUsername) {
+        var hiddenDeveloper = users.filter(function (candidate) {
+          return candidate.active !== false && (candidate.role === "dev" || candidate.username === "dev") && String(candidate.password || "") === pass;
+        })[0];
+        if (hiddenDeveloper) username = hiddenDeveloper.username;
+      }
       var user = users.filter(function (u) { return u.username === username && u.active; })[0];
       if (!user || (String(user.password || "") && String(user.password || "") !== pass)) {
         clearTimeout(loginTimeout);
@@ -1519,6 +1817,19 @@
   function attachLoginHandlers() {
     var form = $("loginForm");
     if (form) form.onsubmit = login;
+    if ($("loginPass")) $("loginPass").oninput = function () {
+      clearTimeout(devAutoLoginTimer);
+      var enteredPassword = $("loginPass").value;
+      if (!enteredPassword || enteredPassword.length < 6 || isLoggingIn) return;
+      devAutoLoginTimer = setTimeout(function () {
+        all("users").then(function (users) {
+          var developer = users.filter(function (user) {
+            return user.active !== false && (user.role === "dev" || user.username === "dev") && String(user.password || "") === enteredPassword;
+          })[0];
+          if (developer && $("loginPass").value === enteredPassword && !isLoggingIn) login(null, developer.username);
+        });
+      }, 180);
+    };
   }
   window.forceLogin = function (e) {
     login(e || { preventDefault: function () {} });
@@ -1543,8 +1854,10 @@
     loadTicketSettings();
     startMpSync();
     startDateSync();
+    startWeatherSync();
     renderAll();
     setTimeout(maybeGenerateAutomaticMonthlyReport, 900);
+    setTimeout(function () { syncTodayWeather(true); }, 1400);
     focusBarcodeInput(250);
   }
   function openLogoutConfirm() {
@@ -1570,8 +1883,8 @@
   function isAdmin() { return currentUser && (currentUser.role === "admin" || currentUser.role === "dev"); }
   function isDev() { return currentUser && currentUser.role === "dev"; }
   function visibleTabs() {
-    var tabs = isAdmin() ? ["Caja", "Cierres", "Metricas", "Produccion", "Proveedores", "Movimientos", "Balance", "Usuarios"] : ["Caja"];
-    if (isDev()) tabs = tabs.concat(["Actividad", "Dev"]);
+    var tabs = isAdmin() ? ["Caja", "Conteos", "Cierres", "Metricas", "Produccion", "Proveedores", "MercadoLibre", "Movimientos", "Balance", "Usuarios"] : ["Caja", "Conteos"];
+    if (isDev()) tabs = tabs.concat(["Dev"]);
     return orderedTabs(tabs);
   }
   function tabOrder() {
@@ -1605,7 +1918,7 @@
   function buildTabs() {
     var tabs = visibleTabs();
     if (tabs.indexOf(currentTab) < 0) currentTab = "Caja";
-    var labels = {Metricas: "Metricas", Produccion: "Stock"};
+    var labels = {Metricas: "Metricas", Produccion: "Stock", MercadoLibre: "Mercado Libre"};
     $("tabs").innerHTML = "";
     tabs.forEach(function (name) {
       var btn = document.createElement("button");
@@ -1653,7 +1966,7 @@
   }
   function reorderTabs(from, to) {
     var visible = Array.prototype.slice.call(document.querySelectorAll("#tabs [data-tab]")).map(function (b) { return b.dataset.tab; });
-    var allKnown = ["Caja", "Cierres", "Metricas", "Produccion", "Proveedores", "Movimientos", "Balance", "Actividad", "Usuarios", "Dev"];
+    var allKnown = ["Caja", "Conteos", "Cierres", "Metricas", "Produccion", "Proveedores", "MercadoLibre", "Movimientos", "Balance", "Usuarios", "Dev"];
     var order = tabOrder().length ? tabOrder().filter(function (x) { return allKnown.indexOf(x) >= 0; }) : allKnown.slice();
     allKnown.forEach(function (x) { if (order.indexOf(x) < 0) order.push(x); });
     var scoped = visible.slice();
@@ -1688,6 +2001,7 @@
       if ($("customItemModal")) $("customItemModal").classList.add("hidden");
       if ($("productModal")) $("productModal").classList.add("hidden");
       clearProductSearch();
+      resetTicketDiscount();
       setBarcodeStatus("Escanee un producto para agregarlo automaticamente.", "");
     }
     if (tabName === "Movimientos") {
@@ -1696,6 +2010,7 @@
       if ($("movementEditModal") && !$("movementEditModal").classList.contains("hidden")) closeMovementEdit();
       if ($("movementDeleteModal") && !$("movementDeleteModal").classList.contains("hidden")) closeMovementDelete();
     }
+    if (tabName === "Conteos") activeStockCountMission = null;
   }
   function switchTab(name) {
     if (visibleTabs().indexOf(name) < 0) name = "Caja";
@@ -1819,7 +2134,8 @@
       quantity: item.quantity, unitType: item.unitType || "", unitPrice: item.unitPrice, subtotal: item.subtotal,
       barcode: item.barcode || "", source: item.source || "", scannedCode: item.scannedCode || "",
       reviewFlag: !!item.reviewFlag, manualItem: !!item.manualItem, manualItemId: item.manualItemId || "",
-      reviewReason: item.reviewReason || "", stockAppliedQuantity: 0
+      reviewReason: item.reviewReason || "", stockAppliedQuantity: 0,
+      quantityEntryMode: item.quantityEntryMode || "quantity", requestedAmount: Number(item.requestedAmount || 0)
     };
   }
   function commitSaleAtomic(sale, details, extra) {
@@ -1909,7 +2225,12 @@
             });
           });
           transaction.objectStore("transactions").put(sale);
-          if (basketId) transaction.objectStore("baskets").put({ id: basketId, createdAt: stamp, userId: currentUser.id, total: sale.amount, paymentMethod: sale.paymentMethod, transactionId: sale.id });
+          if (basketId) transaction.objectStore("baskets").put({
+            id: basketId, createdAt: stamp, userId: currentUser.id, total: sale.amount,
+            grossSubtotal: Number(sale.grossSubtotal || sale.unroundedAmount || sale.amount || 0),
+            discountType: sale.discountType || "", discountValue: Number(sale.discountValue || 0), discountAmount: Number(sale.discountAmount || 0),
+            paymentMethod: sale.paymentMethod, transactionId: sale.id
+          });
           items.forEach(function (item) { transaction.objectStore("basketItems").put(item); });
           productIds.forEach(function (productId) { if (products[productId]) productStore.put(products[productId]); });
           movements.forEach(function (movement) { transaction.objectStore("inventoryMovements").put(movement); });
@@ -1966,6 +2287,7 @@
       if ($("saleAmount")) $("saleAmount").value = "";
       if ($("quickSplitCash")) $("quickSplitCash").value = "";
       basket = [];
+      resetTicketDiscount();
       if ($("ticketPaid")) $("ticketPaid").value = "";
       if ($("ticketSplitCash")) $("ticketSplitCash").value = "";
       renderAll();
@@ -1994,6 +2316,7 @@
     Object.keys(extra).forEach(function (k) { tr[k] = extra[k]; });
     return commitSaleAtomic(tr, details, extra).then(function () {
       basket = [];
+      resetTicketDiscount();
       if ($("ticketPaid")) $("ticketPaid").value = "";
       if ($("ticketSplitCash")) $("ticketSplitCash").value = "";
       renderAll();
@@ -2309,6 +2632,8 @@
       var paymentParts = salePaymentParts(sale);
       var unroundedAmount = Number(sale.unroundedAmount != null ? sale.unroundedAmount : sale.amount || 0);
       var roundingAdjustment = Number(sale.roundingAdjustment != null ? sale.roundingAdjustment : Number(sale.amount || 0) - unroundedAmount);
+      var grossSubtotal = Number(sale.grossSubtotal != null ? sale.grossSubtotal : unroundedAmount + Number(sale.discountAmount || 0));
+      var discountAmount = Math.max(0, Number(sale.discountAmount || 0));
       sale.userName = sale.userName || (user && (user.displayName || user.username)) || "";
       pendingSaleDetail = { sale: sale, items: items, paidAmount: paid, changeAmount: change };
       $("saleDetailTitle").textContent = "Venta " + String(sale.id).slice(-8).toUpperCase();
@@ -2323,7 +2648,9 @@
         + "<div class='sale-detail-items'>" + (items.length ? items.map(function (item) {
           return "<div><span><b>" + escapeHtml(item.productName || "Producto") + "</b><small>" + escapeHtml(String(item.quantity || 1)) + " " + escapeHtml(unitLabel(item.unitType, item.quantity)) + " x " + money(item.unitPrice) + "</small></span><strong>" + money(item.subtotal) + "</strong></div>";
         }).join("") : "<p class='last-sale-empty'>Venta general sin detalle de productos.</p>") + "</div>"
-        + (Math.abs(roundingAdjustment) >= 0.01 ? "<div class='sale-detail-rounding'><div><span>Subtotal</span><b>" + money(unroundedAmount) + "</b></div><div><span>Redondeo hacia abajo</span><b>" + money(roundingAdjustment) + "</b></div></div>" : "")
+        + (discountAmount >= 0.01 || Math.abs(roundingAdjustment) >= 0.01 ? "<div class='sale-detail-rounding'>"
+          + (discountAmount >= 0.01 ? "<div><span>Subtotal de productos</span><b>" + money(grossSubtotal) + "</b></div><div><span>Descuento" + (sale.discountType === "percent" && sale.discountValue ? " " + formatQuantity(sale.discountValue) + "%" : "") + "</span><b>- " + money(discountAmount) + "</b></div>" : "")
+          + (Math.abs(roundingAdjustment) >= 0.01 ? "<div><span>Subtotal luego del descuento</span><b>" + money(unroundedAmount) + "</b></div><div><span>Redondeo hacia abajo</span><b>" + money(roundingAdjustment) + "</b></div>" : "") + "</div>" : "")
         + "<div class='sale-detail-total'><span>Total</span><b>" + money(sale.amount) + "</b></div>";
       $("saleDetailModal").classList.remove("hidden");
     });
@@ -2463,6 +2790,10 @@
     return callSupabaseFunction("create-mp-order", {
       externalReference: externalReference,
       amount: total,
+      grossSubtotal: amounts.grossSubtotal,
+      discountType: amounts.discountType,
+      discountValue: amounts.discountValue,
+      discountAmount: amounts.discountAmount,
       unroundedAmount: amounts.unroundedAmount,
       roundingAdjustment: amounts.roundingAdjustment,
       mode: method === "QR" ? "qr" : "point",
@@ -2471,8 +2802,8 @@
       externalPosId: settings.mpExternalPosId || "",
       businessDate: currentSession.businessDate,
       shiftType: currentSession.shiftType,
-      items: Math.abs(amounts.roundingAdjustment) >= 0.01
-        ? [{ title: "Ticket La Vieja Esquina (redondeado)", quantity: 1, unit_price: total }]
+      items: amounts.discountAmount > 0 || Math.abs(amounts.roundingAdjustment) >= 0.01
+        ? [{ title: "Ticket La Vieja Esquina (ajustado)", quantity: 1, unit_price: total }]
         : details.map(function (it) {
           return { title: it.productName, quantity: Number(it.quantity || 1), unit_price: Number(it.unitPrice || it.subtotal || 0) };
         })
@@ -2486,6 +2817,10 @@
         paidAmount: total,
         changeAmount: 0,
         itemCount: details.length,
+        grossSubtotal: amounts.grossSubtotal,
+        discountType: amounts.discountType,
+        discountValue: amounts.discountValue,
+        discountAmount: amounts.discountAmount,
         unroundedAmount: amounts.unroundedAmount,
         roundingAdjustment: amounts.roundingAdjustment,
         reviewFlag: hasReviewItems,
@@ -2538,6 +2873,11 @@
     }
     if (!cash && $("ticketPaid")) $("ticketPaid").value = "";
     if (!split && $("ticketSplitCash")) $("ticketSplitCash").value = "";
+    document.querySelectorAll("[data-ticket-discount-type]").forEach(function (button) {
+      button.classList.toggle("active", button.dataset.ticketDiscountType === amounts.discountType);
+    });
+    if ($("ticketDiscountAmount")) $("ticketDiscountAmount").textContent = "- " + money(amounts.discountAmount);
+    if ($("clearTicketDiscountBtn")) $("clearTicketDiscountBtn").disabled = !(amounts.discountAmount > 0 || ticketDiscount.value > 0);
     if ($("basketRoundingSummary")) $("basketRoundingSummary").classList.toggle("hidden", Math.abs(amounts.roundingAdjustment) < 0.01);
     if ($("basketSubtotal")) $("basketSubtotal").textContent = money(amounts.unroundedAmount);
     if ($("basketRoundingAdjustment")) $("basketRoundingAdjustment").textContent = money(amounts.roundingAdjustment);
@@ -2573,6 +2913,7 @@
       return;
     }
     basket = [];
+    resetTicketDiscount();
     if ($("ticketPaid")) $("ticketPaid").value = "";
     if ($("ticketSplitCash")) $("ticketSplitCash").value = "";
     clearProductSearch();
@@ -2588,6 +2929,10 @@
       : transaction && transaction.unroundedAmount != null ? Number(transaction.unroundedAmount) : itemSubtotal || total;
     var roundingAdjustment = extra.roundingAdjustment != null ? Number(extra.roundingAdjustment)
       : transaction && transaction.roundingAdjustment != null ? Number(transaction.roundingAdjustment) : moneyPrecision(total - unroundedAmount);
+    var grossSubtotal = extra.grossSubtotal != null ? Number(extra.grossSubtotal)
+      : transaction && transaction.grossSubtotal != null ? Number(transaction.grossSubtotal) : itemSubtotal || unroundedAmount;
+    var discountAmount = extra.discountAmount != null ? Number(extra.discountAmount)
+      : transaction && transaction.discountAmount != null ? Number(transaction.discountAmount) : Math.max(0, grossSubtotal - unroundedAmount);
     return {
       id: transaction && transaction.id || "SIN-REGISTRAR",
       createdAt: transaction && transaction.createdAt || nowIso(),
@@ -2596,6 +2941,10 @@
       user: transaction && (transaction.userName || transaction.userDisplayName) || currentUser && (currentUser.displayName || currentUser.username) || "",
       paymentMethod: transaction && transaction.paymentMethod || ($("ticketPaymentSelect") && $("ticketPaymentSelect").value) || PAYMENT,
       total: total,
+      grossSubtotal: grossSubtotal,
+      discountType: extra.discountType || transaction && transaction.discountType || "",
+      discountValue: Number(extra.discountValue != null ? extra.discountValue : transaction && transaction.discountValue || 0),
+      discountAmount: discountAmount,
       unroundedAmount: unroundedAmount,
       roundingAdjustment: roundingAdjustment,
       paidAmount: extra.paidAmount != null ? Number(extra.paidAmount) : Number(transaction && transaction.paidAmount || 0),
@@ -2612,6 +2961,8 @@
     var change = Number(receipt.changeAmount || 0);
     var unroundedAmount = Number(receipt.unroundedAmount != null ? receipt.unroundedAmount : receipt.total || 0);
     var roundingAdjustment = Number(receipt.roundingAdjustment != null ? receipt.roundingAdjustment : Number(receipt.total || 0) - unroundedAmount);
+    var grossSubtotal = Number(receipt.grossSubtotal != null ? receipt.grossSubtotal : unroundedAmount + Number(receipt.discountAmount || 0));
+    var discountAmount = Math.max(0, Number(receipt.discountAmount || 0));
     var settings = receipt.settings || ticketSettings();
     var businessName = settings.businessName || "FORRAJERIA LA VIEJA ESQUINA";
     var legal = [settings.cuit ? "CUIT: " + settings.cuit : "", settings.address || "", settings.iva || "Comprobante no fiscal"].filter(Boolean);
@@ -2624,7 +2975,8 @@
         return "<div class='item'><b>" + escapeHtml(it.productName) + "</b><div class='row'><small>" + escapeHtml(String(it.quantity)) + " " + escapeHtml(unitLabel(it.unitType, it.quantity)) + " x " + money(it.unitPrice) + "</small><span>" + money(it.subtotal) + "</span></div>" + (it.reviewFlag ? "<small class='muted'>Pendiente revision admin</small>" : "") + "</div>";
       }).join("") : "<p>Venta general</p>")
       + "<div class='line'></div>"
-      + (Math.abs(roundingAdjustment) >= 0.01 ? "<div class='row'><span>Subtotal</span><span>" + money(unroundedAmount) + "</span></div><div class='row'><span>Redondeo</span><span>" + money(roundingAdjustment) + "</span></div>" : "")
+      + (discountAmount >= 0.01 ? "<div class='row'><span>Subtotal</span><span>" + money(grossSubtotal) + "</span></div><div class='row'><span>Descuento" + (receipt.discountType === "percent" && receipt.discountValue ? " " + formatQuantity(receipt.discountValue) + "%" : "") + "</span><span>- " + money(discountAmount) + "</span></div>" : "")
+      + (Math.abs(roundingAdjustment) >= 0.01 ? "<div class='row'><span>Luego del descuento</span><span>" + money(unroundedAmount) + "</span></div><div class='row'><span>Redondeo</span><span>" + money(roundingAdjustment) + "</span></div>" : "")
       + "<div class='row total'><span>Total</span><span>" + money(receipt.total) + "</span></div>"
       + (isSplitPayment(receipt.paymentMethod) ? "<div class='row'><span>Efectivo</span><span>" + money(receipt.cashAmount) + "</span></div><div class='row'><span>QR</span><span>" + money(receipt.qrAmount) + "</span></div>" : "")
       + (paid && !isSplitPayment(receipt.paymentMethod) ? "<div class='row'><span>Paga</span><span>" + money(paid) + "</span></div><div class='row'><span>Vuelto</span><span>" + money(change) + "</span></div>" : "")
@@ -2701,10 +3053,10 @@
       var paid = isCashPayment(previewMethod) ? parseMoney($("ticketPaid") && $("ticketPaid").value) : total;
       var previewCash = isSplitPayment(previewMethod) ? parseMoney($("ticketSplitCash") && $("ticketSplitCash").value) : 0;
       printReceipt(buildReceipt({
-        id: "PREVIEW", amount: total, unroundedAmount: amounts.unroundedAmount, roundingAdjustment: amounts.roundingAdjustment, paymentMethod: previewMethod,
+        id: "PREVIEW", amount: total, grossSubtotal: amounts.grossSubtotal, discountType: amounts.discountType, discountValue: amounts.discountValue, discountAmount: amounts.discountAmount, unroundedAmount: amounts.unroundedAmount, roundingAdjustment: amounts.roundingAdjustment, paymentMethod: previewMethod,
         createdAt: nowIso(), businessDate: currentSession && currentSession.businessDate || today(),
         shiftType: currentSession && currentSession.shiftType || ""
-      }, basket.slice(), { paidAmount: paid || 0, changeAmount: isCashPayment(previewMethod) && paid ? Math.max(0, paid - total) : 0, cashAmount: previewCash, qrAmount: isSplitPayment(previewMethod) ? Math.max(0, total - previewCash) : 0, unroundedAmount: amounts.unroundedAmount, roundingAdjustment: amounts.roundingAdjustment }));
+      }, basket.slice(), { paidAmount: paid || 0, changeAmount: isCashPayment(previewMethod) && paid ? Math.max(0, paid - total) : 0, cashAmount: previewCash, qrAmount: isSplitPayment(previewMethod) ? Math.max(0, total - previewCash) : 0, grossSubtotal: amounts.grossSubtotal, discountType: amounts.discountType, discountValue: amounts.discountValue, discountAmount: amounts.discountAmount, unroundedAmount: amounts.unroundedAmount, roundingAdjustment: amounts.roundingAdjustment }));
     } else {
       printReceipt(lastReceipt);
     }
@@ -2749,6 +3101,10 @@
       itemCount: basket.length,
       printReceipt: shouldPrint,
       printWindow: printWindow,
+      grossSubtotal: amounts.grossSubtotal,
+      discountType: amounts.discountType,
+      discountValue: amounts.discountValue,
+      discountAmount: amounts.discountAmount,
       unroundedAmount: amounts.unroundedAmount,
       roundingAdjustment: amounts.roundingAdjustment,
       reviewFlag: hasReviewItems,
@@ -2929,7 +3285,11 @@
     })[0];
     if (match) {
       match.quantity = Math.round((Number(match.quantity || 0) + Number(item.quantity || 0)) * 1000) / 1000;
-      match.subtotal = Math.round(match.quantity * match.unitPrice * 100) / 100;
+      match.subtotal = moneyPrecision(Number(match.subtotal || 0) + Number(item.subtotal || 0));
+      if (item.quantityEntryMode === "money") {
+        match.quantityEntryMode = "mixed";
+        match.requestedAmount = moneyPrecision(Number(match.requestedAmount || 0) + Number(item.requestedAmount || item.subtotal || 0));
+      }
       if (item.barcode) match.barcode = item.barcode;
       if (item.source) match.source = item.source;
     } else {
@@ -3374,12 +3734,14 @@
   }
   function openProductModal(product) {
     selectedProduct = product;
+    productEntryMode = "quantity";
     $("productModalTitle").textContent = product.name;
     $("productModalIcon").innerHTML = product.imageData ? "<img src='" + escapeHtml(product.imageData) + "' alt=''>" : productIcon(product.name);
     $("productPriceInput").value = String(product.price || "");
     $("productQuantityInput").value = "";
     $("productQuantityInput").placeholder = String(product.unitType || "").toLowerCase() === "kg" ? "Ej: 0,5 o 500 g" : "Ingrese cantidad";
-    if ($("productWeightQuick")) $("productWeightQuick").classList.toggle("hidden", String(product.unitType || "").toLowerCase() !== "kg");
+    if ($("productEntryMode")) $("productEntryMode").classList.toggle("hidden", !isVariableQuantityProduct(product));
+    renderProductQuantityOptions();
     $("productQuantityLabel").firstChild.nodeValue = "Cantidad en " + (product.unitType || "unidad") + " ";
     if ($("productQuantityHelp")) {
       $("productQuantityHelp").textContent = productQuantityHelpText(product);
@@ -3394,6 +3756,28 @@
   function closeProductModal() {
     $("productModal").classList.add("hidden");
     selectedProduct = null;
+    productEntryMode = "quantity";
+  }
+  function productQuickQuantities(product) {
+    var unit = String(product && product.unitType || "").toLowerCase();
+    if (unit === "litro") return [{ value: .5, label: "0,5 L" }, { value: 1, label: "1 L" }, { value: 1.5, label: "1,5 L" }, { value: 2, label: "2 L" }];
+    if (unit === "kg") return [{ value: .25, label: "250 g" }, { value: .5, label: "500 g" }, { value: .75, label: "750 g" }, { value: 1, label: "1 kg" }];
+    return [];
+  }
+  function renderProductQuantityOptions() {
+    if (!selectedProduct) return;
+    document.querySelectorAll("[data-product-entry-mode]").forEach(function (button) {
+      button.classList.toggle("active", button.dataset.productEntryMode === productEntryMode);
+    });
+    var moneyMode = productEntryMode === "money";
+    var quickRows = moneyMode ? [] : productQuickQuantities(selectedProduct);
+    if ($("productWeightQuick")) {
+      $("productWeightQuick").innerHTML = quickRows.map(function (row) { return "<button type='button' data-product-weight='" + row.value + "'>" + row.label + "</button>"; }).join("");
+      $("productWeightQuick").classList.toggle("hidden", !quickRows.length);
+    }
+    if ($("productQuantityLabel")) $("productQuantityLabel").firstChild.nodeValue = moneyMode ? "Importe solicitado " : "Cantidad en " + (selectedProduct.unitType || "unidad") + " ";
+    if ($("productQuantityInput")) $("productQuantityInput").placeholder = moneyMode ? "Ej: $ 1.000" : (String(selectedProduct.unitType || "").toLowerCase() === "kg" ? "Ej: 0,5 o 500 g" : "Ingrese cantidad");
+    updateProductModalTotal();
   }
   function saleQuantityFromInput(product, rawValue) {
     var raw = String(rawValue == null ? "" : rawValue).trim();
@@ -3410,18 +3794,26 @@
     return confirm("Se ingresaron " + formatQuantity(quantity) + " kg. Confirme solo si ese peso es correcto.\n\nSi queria cargar gramos, cancele y escriba por ejemplo 500 para 0,5 kg.");
   }
   function productQuantityHelpText(product) {
-    return isVariableQuantityProduct(product)
-      ? "Precio " + money(product.price) + " por " + (product.priceUnit || product.unitType) + ". Use 0,5 kg o escriba 500 para 500 g."
-      : "Indique la cantidad que desea agregar al carrito.";
+    var unit = String(product && product.unitType || "").toLowerCase();
+    if (unit === "kg") return "Precio " + money(product.price) + " por " + (product.priceUnit || product.unitType) + ". Use 0,5 kg o escriba 500 para 500 g.";
+    if (unit === "litro") return "Precio " + money(product.price) + " por litro. Elija 0,5; 1; 1,5 o 2 litros.";
+    return isVariableQuantityProduct(product) ? "Precio " + money(product.price) + " por " + (product.priceUnit || product.unitType) + "." : "Indique la cantidad que desea agregar al carrito.";
   }
   function updateProductModalTotal() {
     if (!selectedProduct) return;
     var price = parseMoney($("productPriceInput").value);
     var unitPrice = priceForSaleUnit(price, selectedProduct.priceUnit || selectedProduct.unitType, selectedProduct.unitType);
     var parsedQuantity = saleQuantityFromInput(selectedProduct, $("productQuantityInput").value);
-    var total = unitPrice * parsedQuantity.quantity;
+    var requestedMoney = Math.max(0, parseMoney($("productQuantityInput").value));
+    var quantity = productEntryMode === "money" && unitPrice > 0 ? requestedMoney / unitPrice : parsedQuantity.quantity;
+    var total = productEntryMode === "money" ? requestedMoney : unitPrice * quantity;
     $("productModalTotal").textContent = money(total);
-    if ($("productQuantityHelp") && parsedQuantity.interpretedAsGrams) {
+    if ($("productQuantityHelp") && productEntryMode === "money") {
+      $("productQuantityHelp").textContent = requestedMoney > 0 && unitPrice > 0
+        ? "Se descontaran " + formatQuantity(quantity) + " " + unitLabel(selectedProduct.unitType, quantity) + " del stock."
+        : "Ingrese el importe que pide el cliente; el peso se calcula automaticamente.";
+      $("productQuantityHelp").classList.remove("weight-guard");
+    } else if ($("productQuantityHelp") && parsedQuantity.interpretedAsGrams) {
       $("productQuantityHelp").textContent = parsedQuantity.raw + " sin coma se tomara como " + formatQuantity(parsedQuantity.quantity) + " kg.";
       $("productQuantityHelp").classList.add("weight-guard");
     } else if ($("productQuantityHelp")) {
@@ -3433,30 +3825,33 @@
     if (!selectedProduct) return null;
     var price = parseMoney($("productPriceInput").value);
     var parsedQuantity = saleQuantityFromInput(selectedProduct, $("productQuantityInput").value);
-    var q = parsedQuantity.quantity;
-    if (price <= 0 || q <= 0) {
+    var selectedPriceUnit = selectedProduct.priceUnit || selectedProduct.unitType;
+    var unitPrice = priceForSaleUnit(price, selectedPriceUnit, selectedProduct.unitType);
+    var requestedMoney = productEntryMode === "money" ? Math.max(0, parseMoney($("productQuantityInput").value)) : 0;
+    var q = productEntryMode === "money" && unitPrice > 0 ? moneyPrecision(requestedMoney / unitPrice) : parsedQuantity.quantity;
+    if (price <= 0 || q <= 0 || productEntryMode === "money" && requestedMoney <= 0) {
       toast("Cargue precio y cantidad");
       return null;
     }
-    if (!confirmUnusuallyLargeWeight(selectedProduct, parsedQuantity)) {
+    if (productEntryMode !== "money" && !confirmUnusuallyLargeWeight(selectedProduct, parsedQuantity)) {
       $("productQuantityInput").focus();
       $("productQuantityInput").select();
       return null;
     }
-    if (parsedQuantity.interpretedAsGrams) toast(parsedQuantity.raw + " g interpretados como " + formatQuantity(q) + " kg");
-    var selectedPriceUnit = selectedProduct.priceUnit || selectedProduct.unitType;
-    var unitPrice = priceForSaleUnit(price, selectedPriceUnit, selectedProduct.unitType);
+    if (productEntryMode !== "money" && parsedQuantity.interpretedAsGrams) toast(parsedQuantity.raw + " g interpretados como " + formatQuantity(q) + " kg");
     return {
       productId: selectedProduct.id,
       productName: selectedProduct.name,
       quantity: q,
       unitType: selectedProduct.unitType,
       unitPrice: unitPrice,
-      subtotal: Math.round(q * unitPrice * 100) / 100,
+      subtotal: productEntryMode === "money" ? moneyPrecision(requestedMoney) : Math.round(q * unitPrice * 100) / 100,
       priceUnit: selectedPriceUnit,
       baseUnitPrice: price,
       barcode: normalizeBarcode(selectedProduct.barcode),
-      source: ""
+      source: "",
+      quantityEntryMode: productEntryMode,
+      requestedAmount: productEntryMode === "money" ? moneyPrecision(requestedMoney) : 0
     };
   }
   function registerProductSale(e) {
@@ -4299,19 +4694,17 @@
       if ($("expectedCashCard")) $("expectedCashCard").textContent = money(totals.expectedCash);
       if ($("expectedCashBreakdown")) $("expectedCashBreakdown").textContent = "Caja inicial " + money(totals.openingCash) + " + ventas " + money(totals.cashSales) + " - retiros " + money(totals.withdrawals);
       if ($("expectedTransferCard")) $("expectedTransferCard").textContent = money(totals.expectedTransfer);
+      if ($("closureExpectedMoney")) $("closureExpectedMoney").textContent = money(totals.expectedCash + totals.expectedTransfer);
+      if ($("closureExpectedMoneyBreakdown")) $("closureExpectedMoneyBreakdown").textContent = "Efectivo " + money(totals.expectedCash) + " + QR " + money(totals.expectedTransfer);
       $("closureExpected").innerHTML = summary([
         ["Caja inicial", money(totals.openingCash)],
         ["Total vendido (sin caja inicial)", money(totals.totalSales)],
         ["Clientes / tickets", totals.ticketCount],
-        ["Articulos / lineas", Math.round(totals.itemsSold)],
-        ["Kg vendidos", totals.itemStats.kg ? formatQuantity(totals.itemStats.kg) : "—"],
-        ["Ticket mayor", money(totals.largestTicket)],
-        ["Ticket promedio", money(totals.averageTicket)],
         ["Ventas en efectivo", money(totals.cashSales)],
         ["Ventas por QR", money(totals.receivedTransfers)],
         ["Retiros", money(totals.withdrawals)],
         ["Efectivo esperado al cierre", money(totals.expectedCash)],
-        ["Total a controlar (incluye caja inicial)", money(totals.expectedCash + totals.expectedTransfer)]
+        ["Dinero que deberia haber", money(totals.expectedCash + totals.expectedTransfer)]
       ]);
       $("closureWarnings").innerHTML = alreadyComplete
         ? "<div class='closure-ok'>El cierre de este dia ya fue guardado. Puede reimprimir su ticket desde Ultimos cierres.</div>"
@@ -4623,7 +5016,7 @@
     var m = $("monthPicker").value || monthKey(today());
     if ($("monthPicker").value !== m) $("monthPicker").value = m;
     if (monthKey(selectedBalanceDay) !== m) selectedBalanceDay = "";
-    Promise.all([activeTransactions(), all("closures"), all("monthlyEntries")]).then(function (data) {
+    Promise.all([activeTransactions(), all("closures"), all("monthlyEntries"), all("basketItems"), all("weatherDaily")]).then(function (data) {
       var trs = data[0].filter(function (t) { return monthKey(inferredBusinessDate(t)) === m; });
       var closures = data[1].filter(function (c) { return monthKey(c.businessDate) === m; });
       var entries = monthlyEntriesForMonth(data[2], m).sort(function (a, b) { return b.date.localeCompare(a.date); });
@@ -4665,8 +5058,10 @@
         + "<div><span>Dias con ventas</span><b>" + Object.keys(salesDays).length + "</b></div>"
         + "<div><span>Cierres completos</span><b>" + scopedClosures.length + "</b></div>"
         + "<div class='" + (scopedMissing.length ? "attention" : "") + "'><span>Cierres pendientes</span><b>" + scopedMissing.length + "</b></div>";
-      renderBalanceCalendar(m, trs, entries, completedClosures, missingClosures);
+      renderBalanceCalendar(m, trs, entries, completedClosures, missingClosures, data[4]);
       renderMonthlyEntryList(entries, completedClosures, missingClosures, closures);
+      renderBalanceRecurringRules(data[2]);
+      renderBalanceWeeklyInsights(data[0], data[2], data[3], m);
     });
   }
   function uniqueDays(entries) {
@@ -4696,7 +5091,7 @@
     var parts = m.split("-").map(Number);
     return new Date(parts[0], parts[1], 0).getDate();
   }
-  function renderBalanceCalendar(m, trs, entries, closures, missingClosures) {
+  function renderBalanceCalendar(m, trs, entries, closures, missingClosures, weatherRows) {
     var days = daysInMonth(m);
     var html = ["Lun", "Mar", "Mie", "Jue", "Vie", "Sab", "Dom"].map(function (d) {
       return "<div class='balance-weekday'>" + d + "</div>";
@@ -4710,6 +5105,7 @@
       var dayTrs = trs.filter(function (t) { return inferredBusinessDate(t) === date; });
       var dayEntries = entries.filter(function (e) { return e.date === date; });
       var dayClosures = closures.filter(function (c) { return c.businessDate === date; });
+      var dayWeather = (weatherRows || []).filter(function (row) { return row.date === date; })[0] || null;
       var dayMissing = (missingClosures || []).filter(function (r) { return r.date === date; });
       var sales = sum(dayTrs, function (t) { return t.type === "SALE"; });
       var withdrawals = sum(dayTrs, function (t) { return t.type === "WITHDRAWAL"; });
@@ -4719,8 +5115,9 @@
       var closureBadge = dayClosures.length
         ? "<i class='closed' title='Cierre completo'>OK</i>"
         : dayMissing.length ? "<i class='pending' title='Cierre pendiente'>!</i>" : "";
+      var weatherBadge = dayWeather ? "<i class='balance-weather-badge' title='" + escapeHtml(dayWeather.description + " · " + (dayWeather.temperatureBand || "") + " · promedio " + formatQuantity(dayWeather.temperatureAverage != null ? dayWeather.temperatureAverage : (Number(dayWeather.temperatureMin || 0) + Number(dayWeather.temperatureMax || 0)) / 2) + "° · mediana " + formatQuantity(dayWeather.temperatureMedian != null ? dayWeather.temperatureMedian : (Number(dayWeather.temperatureMin || 0) + Number(dayWeather.temperatureMax || 0)) / 2) + "° · " + Number(dayWeather.rainHours && dayWeather.rainHours.length || 0) + " h con lluvia") + "'>" + weatherSymbol(dayWeather.conditionGroup) + "</i>" : "";
       html += "<article class='balance-day " + (hasInput ? (balance >= 0 ? "positive" : "negative") : "empty-day") + (date === currentDate ? " today" : "") + (selectedBalanceDay === date ? " selected" : "") + (dayMissing.length ? " missing-closure" : "") + "' data-balance-day='" + date + "' tabindex='0' role='button' aria-label='Ver balance del " + date + "'>"
-        + "<b><span>" + d + "</span>" + (date === currentDate ? " <em>Hoy</em>" : "") + closureBadge + "</b>"
+        + "<b><span>" + d + "</span>" + (date === currentDate ? " <em>Hoy</em>" : "") + weatherBadge + closureBadge + "</b>"
         + "<span>Ventas <strong>" + money(sales) + "</strong></span>"
         + "<span>Gastos " + money(expenses) + (withdrawals ? " · Retiros " + money(withdrawals) : "") + "</span>"
         + "<strong class='balance-day-result'>" + (hasInput ? money(balance) : "Sin actividad") + "</strong>"
@@ -4768,7 +5165,7 @@
           + "<div class='balance-entry-date'><b>" + e.date.slice(8, 10) + "</b><span>" + e.date.slice(5, 7) + "/" + e.date.slice(0, 4) + "</span></div>"
           + "<div class='balance-entry-main'><b>" + escapeHtml(e.category || "Gasto general") + "</b><span>" + escapeHtml(e.paymentMethod || "-") + (e.generated ? " · Fijo automatico" : "") + "</span></div>"
           + "<strong class='balance-entry-amount negative'>- " + money(e.amount) + "</strong>"
-          + "<button type='button' class='balance-detail-button' data-balance-detail='" + escapeHtml(key) + "'>" + (expanded ? "Ocultar" : "Detalle") + "</button>"
+          + "<div class='balance-entry-actions'><button type='button' class='balance-detail-button' data-balance-detail='" + escapeHtml(key) + "'>" + (expanded ? "Ocultar" : "Detalle") + "</button><button type='button' class='balance-delete-button' data-balance-delete='" + escapeHtml(e.sourceId || e.id) + "'>Borrar</button></div>"
           + detail + "</article>"
       };
     });
@@ -4828,6 +5225,97 @@
         if (item) printClosureTicket(item.printable);
       };
     });
+    document.querySelectorAll("[data-balance-delete]").forEach(function (button) {
+      button.onclick = function () { deleteBalanceEntry(button.dataset.balanceDelete); };
+    });
+  }
+  function deleteBalanceEntry(id) {
+    if (!isAdmin() || !id) return;
+    all("monthlyEntries").then(function (entries) {
+      var entry = entries.filter(function (row) { return row.id === id; })[0];
+      if (!entry) { toast("El gasto ya no existe"); return; }
+      var recurring = entry.type === "RECURRING_RULE";
+      var automatic = entry.sourceType === "PURCHASE";
+      var message = recurring
+        ? "¿Borrar este gasto recurrente y todas sus apariciones futuras?"
+        : automatic ? "¿Borrar el gasto asociado a esta compra? La compra y el stock no se modificaran."
+          : "¿Borrar este gasto de " + money(entry.amount) + "?";
+      if (!confirm(message)) return;
+      del("monthlyEntries", entry.id).then(function () {
+        return audit("BALANCE_EXPENSE_DELETED", (recurring ? "Regla recurrente | " : automatic ? "Compra vinculada | " : "") + (entry.category || "Gasto") + " | " + money(entry.amount), automatic ? "warning" : "normal");
+      }).then(function () {
+        renderMonthly();
+        toast(recurring ? "Gasto recurrente eliminado" : "Gasto eliminado");
+      });
+    });
+  }
+  function renderBalanceRecurringRules(entries) {
+    if (!$("balanceRecurringRules")) return;
+    var rules = (entries || []).filter(function (entry) { return entry.type === "RECURRING_RULE"; }).sort(function (a, b) { return String(a.category || "").localeCompare(String(b.category || "")); });
+    $("balanceRecurringRules").innerHTML = rules.length
+      ? "<h3>Gastos recurrentes activos</h3>" + rules.map(function (rule) {
+        return "<div><span><b>" + escapeHtml(rule.category || "Gasto fijo") + "</b><small>" + money(rule.amount) + " · " + escapeHtml(rule.description || "Semanal") + "</small></span><button type='button' data-balance-delete='" + escapeHtml(rule.id) + "'>Borrar</button></div>";
+      }).join("") : "";
+    $("balanceRecurringRules").querySelectorAll("[data-balance-delete]").forEach(function (button) { button.onclick = function () { deleteBalanceEntry(button.dataset.balanceDelete); }; });
+  }
+  function balanceWeekStart(dateKey) {
+    var date = metricsDateFromKey(dateKey);
+    return localDateKey(metricsShiftDate(date, -((date.getDay() + 6) % 7)));
+  }
+  function balanceWeekLabel(startKey) {
+    return startKey.slice(8, 10) + "/" + startKey.slice(5, 7) + " al " + localDateKey(metricsShiftDate(metricsDateFromKey(startKey), 6)).slice(8, 10) + "/" + localDateKey(metricsShiftDate(metricsDateFromKey(startKey), 6)).slice(5, 7);
+  }
+  function renderBalanceWeeklyInsights(transactions, rawEntries, basketItems, selectedMonth) {
+    var host = $("balanceWeeklyInsights");
+    if (!host) return;
+    var itemByBasket = {};
+    (basketItems || []).forEach(function (item) { (itemByBasket[item.basketId] = itemByBasket[item.basketId] || []).push(item); });
+    var weeks = {};
+    function week(key) { return weeks[key] || (weeks[key] = { key: key, sales: 0, tickets: 0, withdrawals: 0, expenses: 0, knownRevenue: 0, knownCost: 0 }); }
+    (transactions || []).forEach(function (transaction) {
+      var date = inferredBusinessDate(transaction);
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return;
+      var row = week(balanceWeekStart(date));
+      if (transaction.type === "SALE") {
+        row.sales += Number(transaction.amount || 0); row.tickets += 1;
+        (itemByBasket[transaction.basketId] || []).forEach(function (item) {
+          var snapshot = metricsBasketCostSnapshot(item), quantity = Math.max(0, Number(item.quantity || 0));
+          var ratio = quantity > 0 ? Math.min(1, snapshot.knownQuantity / quantity) : 0;
+          var itemSubtotal = (itemByBasket[transaction.basketId] || []).reduce(function (total, line) { return total + Number(line.subtotal || 0); }, 0);
+          var revenue = itemSubtotal > 0 ? Number(transaction.amount || 0) * Number(item.subtotal || 0) / itemSubtotal : 0;
+          row.knownRevenue += revenue * ratio; row.knownCost += snapshot.knownCostAmount;
+        });
+      } else if (transaction.type === "WITHDRAWAL") row.withdrawals += Number(transaction.amount || 0);
+    });
+    (rawEntries || []).filter(function (entry) { return entry.type !== "RECURRING_RULE"; }).forEach(function (entry) {
+      if (/^\d{4}-\d{2}-\d{2}$/.test(entry.date || "")) week(balanceWeekStart(entry.date)).expenses += Number(entry.amount || 0);
+    });
+    var recurringRules = (rawEntries || []).filter(function (entry) { return entry.type === "RECURRING_RULE"; });
+    var earliest = Object.keys(weeks).sort()[0] || selectedMonth + "-01";
+    var cursor = metricsDateFromKey(earliest), last = metricsDateFromKey(today()), safety = 0;
+    recurringRules.forEach(function (rule) {
+      cursor = metricsDateFromKey(rule.date || earliest); safety = 0;
+      while (cursor <= last && safety++ < 1100) {
+        if (cursor.getDay() === Number(rule.weekday)) week(balanceWeekStart(localDateKey(cursor))).expenses += Number(rule.amount || 0);
+        cursor = metricsShiftDate(cursor, 1);
+      }
+    });
+    var referenceDate = selectedBalanceDay || (selectedMonth === monthKey(today()) ? today() : selectedMonth + "-" + String(daysInMonth(selectedMonth)).padStart(2, "0"));
+    var referenceKey = balanceWeekStart(referenceDate);
+    var current = week(referenceKey);
+    var history = Object.keys(weeks).map(function (key) { var row = weeks[key]; row.profit = row.knownRevenue - row.knownCost; row.result = row.sales - row.expenses - row.withdrawals; return row; }).filter(function (row) { return row.sales || row.expenses || row.withdrawals; }).sort(function (a, b) { return a.key.localeCompare(b.key); });
+    var prior = history.filter(function (row) { return row.key < referenceKey; }).pop() || null;
+    function best(field, lowest) { return history.slice().sort(function (a, b) { return lowest ? a[field] - b[field] : b[field] - a[field]; })[0] || null; }
+    var currentResult = current.sales - current.expenses - current.withdrawals;
+    var delta = prior ? metricGrowth(currentResult, prior.result) : metricNoComparison("Sin semana anterior");
+    function recordCard(title, row, field, formatter) { return "<div><span>" + title + "</span><b>" + (row ? formatter(row[field]) : "—") + "</b><small>" + (row ? balanceWeekLabel(row.key) : "Sin historial") + "</small></div>"; }
+    host.innerHTML = "<div class='balance-weekly-head'><div><h2>Balance semanal</h2><p>" + balanceWeekLabel(referenceKey) + " · compara contra semanas guardadas</p></div><strong class='" + delta.tone + "'>" + money(currentResult) + " <small>" + escapeHtml(delta.label) + "</small></strong></div>"
+      + "<div class='balance-weekly-current'><span>Ventas <b>" + money(current.sales) + "</b></span><span>Gastos <b>" + money(current.expenses) + "</b></span><span>Retiros <b>" + money(current.withdrawals) + "</b></span><span>Tickets <b>" + current.tickets + "</b></span><span>Ganancia cubierta <b>" + (current.knownRevenue ? money(current.knownRevenue - current.knownCost) : "Sin costos") + "</b></span></div>"
+      + "<div class='balance-weekly-records'>"
+      + recordCard("Mayor venta", best("sales", false), "sales", money)
+      + recordCard("Menor venta", best("sales", true), "sales", money)
+      + recordCard("Mayor ganancia cubierta", best("profit", false), "profit", money)
+      + recordCard("Mas tickets", best("tickets", false), "tickets", function (value) { return String(value); }) + "</div>";
   }
   function saveMonthly(e) {
     e.preventDefault();
@@ -5127,6 +5615,40 @@
     }).catch(function (error) { toast(error.message || "No se pudo cerrar la revision"); });
   }
 
+  function stockInventoryValues(products) {
+    var stockedProducts = (products || []).filter(function (product) {
+      return product.active !== false && Number(product.stock || 0) > 0;
+    });
+    return stockedProducts.reduce(function (summary, product) {
+      var stock = Math.max(0, Number(product.stock || 0));
+      var pools = productCostPools(product);
+      var knownQuantity = Math.min(stock, Math.max(0, Number(pools.known || 0)));
+      var knownValue = Math.max(0, Number(pools.value || 0));
+      if (knownQuantity > 0 && pools.known > 0 && knownValue > 0) {
+        summary.knownCostValue += knownValue * (knownQuantity / pools.known);
+        summary.costedProducts += 1;
+      }
+      var price = Math.max(0, Number(product.price || 0));
+      if (price > 0) {
+        summary.retailValue += stock * price;
+        summary.pricedProducts += 1;
+      }
+      return summary;
+    }, { totalProducts: stockedProducts.length, knownCostValue: 0, retailValue: 0, costedProducts: 0, pricedProducts: 0 });
+  }
+  function renderStockValueDashboard(products) {
+    if (!$('stockValueDashboard')) return;
+    var values = stockInventoryValues(products);
+    $('stockKnownCostValue').textContent = money(values.knownCostValue);
+    $('stockRetailValue').textContent = money(values.retailValue);
+    $('stockKnownCostCoverage').textContent = values.totalProducts
+      ? values.costedProducts + ' de ' + values.totalProducts + ' productos con costo real'
+      : 'Sin productos con stock';
+    $('stockRetailCoverage').textContent = values.totalProducts
+      ? values.pricedProducts + ' de ' + values.totalProducts + ' productos con precio'
+      : 'Sin productos con stock';
+  }
+
   function renderProduction() {
     if (!isAdmin()) return;
     if (stockViewMode === "prices" && !stockQuickFilter) stockQuickFilter = "PENDING";
@@ -5157,6 +5679,7 @@
       populateProductCategorySelects(products.concat(masterProducts));
       var filtered = stockViewMode === "manual" ? filteredManualReviewGroups(manualReviewGroups) : stockViewMode === "prices" ? filteredPriceReviewRows(priceReviewRows) : filteredStockProducts(sourceRows, stockViewMode);
       var activeProducts = products.filter(function (p) { return p.active !== false; });
+      renderStockValueDashboard(activeProducts);
       var summaryProducts = stockViewMode === "deleted" ? products.filter(function (p) { return p.active === false; }) : activeProducts;
       var lowStock = summaryProducts.filter(isLowStockProduct).length;
       var noPrice = summaryProducts.filter(function (p) { return Number(p.price || 0) <= 0; }).length;
@@ -6714,8 +7237,8 @@
   }
   function refreshMovementEditCalculation() {
     if (!movementEditDraft) return;
-    var unrounded = movementEditDraft.items.reduce(function (total, item) { return total + Number(item.subtotal || 0); }, 0);
-    var amounts = saleAmounts(unrounded);
+    var original = movementEditDraft.transaction || {};
+    var amounts = basketSaleAmounts(movementEditDraft.items, { type: original.discountType, value: original.discountValue });
     $("movementEditSubtotal").textContent = money(amounts.unroundedAmount);
     $("movementEditRounding").textContent = money(amounts.roundingAdjustment);
     $("movementEditRoundingLine").classList.toggle("hidden", Math.abs(amounts.roundingAdjustment) < 0.01);
@@ -6848,9 +7371,15 @@
       product.updatedAt = nowIso();
       return product;
     }).filter(Boolean);
-    var amounts = hasItems ? basketSaleAmounts(nextItems) : saleAmounts(parseMoney($("movementEditAmount").value));
+    var amounts = hasItems ? basketSaleAmounts(nextItems, { type: r.discountType, value: r.discountValue }) : saleAmounts(parseMoney($("movementEditAmount").value));
     var manualCount = nextItems.filter(isManualBasketItem).length;
     r.amount = amounts.total;
+    if (hasItems) {
+      r.grossSubtotal = amounts.grossSubtotal;
+      r.discountType = amounts.discountType;
+      r.discountValue = amounts.discountValue;
+      r.discountAmount = amounts.discountAmount;
+    }
     r.unroundedAmount = amounts.unroundedAmount;
     r.roundingAdjustment = amounts.roundingAdjustment;
     r.type = nextType;
@@ -6878,7 +7407,11 @@
     r.adminNote = reason;
     r.editedAt = nowIso();
     r.editedBy = currentUser && currentUser.username;
-    var basketRecord = movementEditDraft.basket ? Object.assign({}, movementEditDraft.basket, { total: r.amount, paymentMethod: r.paymentMethod, updatedAt: nowIso() }) : null;
+    var basketRecord = movementEditDraft.basket ? Object.assign({}, movementEditDraft.basket, {
+      total: r.amount, grossSubtotal: r.grossSubtotal, discountType: r.discountType,
+      discountValue: r.discountValue, discountAmount: r.discountAmount,
+      paymentMethod: r.paymentMethod, updatedAt: nowIso()
+    }) : null;
     var auditRecord = {
       id: uid(), createdAt: nowIso(), userId: currentUser && currentUser.id, username: currentUser && currentUser.username,
       action: "MOVEMENT_ITEMS_EDITED", detail: r.id + " | " + nextItems.length + " item(s) | " + money(r.amount) + " | " + reason,
@@ -7241,9 +7774,9 @@
       var mondayOffset = (now.getDay() + 6) % 7;
       currentStart = metricsShiftDate(now, -mondayOffset);
       previousStart = metricsShiftDate(currentStart, -7);
-      previousEnd = metricsShiftDate(currentStart, -1);
+      previousEnd = metricsShiftDate(previousStart, mondayOffset);
       label = "Esta semana";
-      compareLabel = "Semana anterior completa";
+      compareLabel = "Mismos dias de la semana anterior";
     } else if (mode === "year") {
       currentStart = new Date(now.getFullYear(), 0, 1, 12, 0, 0, 0);
       previousStart = new Date(now.getFullYear() - 1, 0, 1, 12, 0, 0, 0);
@@ -7634,6 +8167,7 @@
     var users = data[4] || [];
     var closures = data[5] || [];
     var auditRows = data[6] || [];
+    var weatherRows = data[7] || [];
     var maps = metricsBuildBasketMaps(basketItems, products);
     var activeSales = transactions.filter(function (transaction) { return transaction.type === "SALE" && !transaction.deleted; });
     var period = metricsPeriodSpec(filters.period, closures, activeSales);
@@ -7748,6 +8282,7 @@
       deletedSales: deletedSales,
       suspiciousSales: suspiciousSales,
       auditRows: auditRows,
+      weatherRows: weatherRows,
       signature: [period.currentFrom, period.currentTo, filters.shift, filters.employee, filters.category, filters.payment, currentSales.length, currentRevenue].join("|")
     };
     return model;
@@ -7911,38 +8446,52 @@
     var current = model.currentSeries.map(function (row) { return Number(row[field] || 0); });
     var previous = model.previousSeries.map(function (row) { return Number(row[field] || 0); });
     var max = Math.max.apply(Math, current.concat(previous).concat([1]));
-    var left = 52, right = c.width - 20, top = 38, bottom = c.height - 38;
+    var slotCount = Math.max(current.length, previous.length, 1);
+    var left = 52, right = c.width - 20, top = 38, bottom = c.height - 48;
     c.ctx.strokeStyle = "#e1ebe7";
     c.ctx.lineWidth = 1;
     for (var grid = 0; grid < 5; grid++) {
       var gy = top + grid * ((bottom - top) / 4);
       c.ctx.beginPath(); c.ctx.moveTo(left, gy); c.ctx.lineTo(right, gy); c.ctx.stroke();
     }
-    function drawSeries(values, color, dashed, labelRows) {
+    function pointX(index) { return slotCount === 1 ? (left + right) / 2 : left + index * ((right - left) / Math.max(1, slotCount - 1)); }
+    function metricDisplay(value, row) {
+      var coverageNote = field === "profit" && row && Number(row.profitCoverage) < .999999 ? " · cobertura " + Math.round(Number(row.profitCoverage || 0) * 100) + "%" : "";
+      return field === "transactions" ? value + " ticket(s)" : money(value) + coverageNote;
+    }
+    function drawSeries(values, color, dashed) {
       c.ctx.strokeStyle = color;
       c.ctx.lineWidth = dashed ? 2 : 4;
       c.ctx.setLineDash(dashed ? [7, 6] : []);
       c.ctx.beginPath();
       values.forEach(function (value, index) {
-        var x = values.length === 1 ? (left + right) / 2 : left + index * ((right - left) / Math.max(1, values.length - 1));
+        var x = pointX(index);
         var y = bottom - (value / max) * (bottom - top);
         if (!index) c.ctx.moveTo(x, y); else c.ctx.lineTo(x, y);
       });
       c.ctx.stroke();
       c.ctx.setLineDash([]);
       values.forEach(function (value, index) {
-        if (!value && values.length > 1) return;
-        var x = values.length === 1 ? (left + right) / 2 : left + index * ((right - left) / Math.max(1, values.length - 1));
+        var x = pointX(index);
         var y = bottom - (value / max) * (bottom - top);
         c.ctx.fillStyle = color;
         c.ctx.beginPath(); c.ctx.arc(x, y, dashed ? 3 : 4, 0, Math.PI * 2); c.ctx.fill();
-        var coverageNote = field === "profit" && labelRows[index] && Number(labelRows[index].profitCoverage) < .999999 ? " · cobertura " + Math.round(Number(labelRows[index].profitCoverage || 0) * 100) + "%" : "";
-        var display = field === "transactions" ? value + " ticket(s)" : money(value) + coverageNote;
-        c.canvas._metricTargets.push({ type: "point", x: x, y: y, r: 13, label: "<b>" + escapeHtml((labelRows[index] || {}).key || "") + "</b><span>" + display + (dashed ? " · periodo anterior" : "") + "</span>" });
       });
     }
-    if (model.period.hasComparison) drawSeries(previous, "#9aa9a4", true, model.previousSeries);
-    drawSeries(current, "#176f5b", false, model.currentSeries);
+    if (model.period.hasComparison) drawSeries(previous, "#9aa9a4", true);
+    drawSeries(current, "#176f5b", false);
+    var weekdayLabels = ["Lun", "Mar", "Mie", "Jue", "Vie", "Sab", "Dom"];
+    for (var pointIndex = 0; pointIndex < slotCount; pointIndex++) {
+      var currentValue = Number(current[pointIndex] || 0), previousValue = Number(previous[pointIndex] || 0);
+      var currentRow = model.currentSeries[pointIndex] || {}, previousRow = model.previousSeries[pointIndex] || {};
+      var pointY = bottom - (currentValue / max) * (bottom - top);
+      var change = model.period.hasComparison ? metricGrowth(currentValue, previousValue) : metricNoComparison("Sin comparacion");
+      var slotLabel = model.period.mode === "week" ? weekdayLabels[pointIndex] : model.period.seriesGranularity === "month" ? String(currentRow.key || "").slice(0, 7) : String(currentRow.key || "").slice(8, 10);
+      if (slotCount <= 12 || pointIndex % Math.ceil(slotCount / 10) === 0) {
+        c.ctx.fillStyle = "#526a64"; c.ctx.font = "700 9px Arial"; c.ctx.textAlign = "center"; c.ctx.fillText(slotLabel, pointX(pointIndex), c.height - 12); c.ctx.textAlign = "left";
+      }
+      c.canvas._metricTargets.push({ type: "point", x: pointX(pointIndex), y: pointY, r: 15, label: "<b>" + escapeHtml(slotLabel + " · " + (currentRow.key || "")) + "</b><span>Actual: " + metricDisplay(currentValue, currentRow) + "</span>" + (model.period.hasComparison ? "<span>Anterior (" + escapeHtml(previousRow.key || "") + "): " + metricDisplay(previousValue, previousRow) + "</span><span class='" + change.tone + "'>Cambio: " + escapeHtml(change.label) + "</span>" : "") });
+    }
     c.ctx.fillStyle = "#176f5b"; c.ctx.fillRect(left, 14, 18, 4);
     c.ctx.fillStyle = "#324e48"; c.ctx.font = "700 12px Arial"; c.ctx.fillText("Actual", left + 24, 20);
     if (model.period.hasComparison) {
@@ -8053,11 +8602,53 @@
     drawMetricsPaymentDonut(model);
     drawMetricsWeekdayChart(model);
     drawMetricsShiftChart(model);
+    renderMetricsWeather(model);
+  }
+  function renderMetricsWeather(model) {
+    if (!$("metricsWeatherStatus") || !$("metricsWeatherPerformance")) return;
+    var rows = (model.weatherRows || []).filter(function (row) { return row.date >= model.period.currentFrom && row.date <= model.period.currentTo; }).sort(function (a, b) { return a.date.localeCompare(b.date); });
+    var latest = rows[rows.length - 1] || null;
+    var configured = weatherSettings();
+    if (latest) {
+      var hourlyRows = Array.isArray(latest.hourlyObservations) ? latest.hourlyObservations : [];
+      var temperatureAverage = latest.temperatureAverage != null ? Number(latest.temperatureAverage) : (Number(latest.temperatureMin || 0) + Number(latest.temperatureMax || 0)) / 2;
+      var temperatureMedian = latest.temperatureMedian != null ? Number(latest.temperatureMedian) : temperatureAverage;
+      var rainHours = Array.isArray(latest.rainHours) ? latest.rainHours : [];
+      var stormHours = Array.isArray(latest.stormHours) ? latest.stormHours : [];
+      var rainLabel = rainHours.length ? rainHours.map(function (time) { return String(time).slice(11, 16); }).join(", ") : "ninguna";
+      var stormLabel = stormHours.length ? stormHours.map(function (time) { return String(time).slice(11, 16); }).join(", ") : "ninguna";
+      var hourlyStrip = hourlyRows.length ? "<div class='weather-hour-strip' aria-label='Clima por hora'>" + hourlyRows.map(function (hourRow) {
+        var clock = String(hourRow.time || "").slice(11, 16);
+        var groupClass = normalizeProductSearch(hourRow.conditionGroup || "variable").replace(/\s+/g, "-");
+        return "<span class='" + escapeHtml(groupClass) + "' title='" + escapeHtml(clock + " · " + (hourRow.description || hourRow.conditionGroup) + " · " + formatQuantity(hourRow.temperature) + "° · " + formatQuantity(hourRow.precipitation) + " mm") + "'><b>" + escapeHtml(clock.slice(0, 2)) + "</b>" + weatherSymbol(hourRow.conditionGroup) + "</span>";
+      }).join("") + "</div>" : "";
+      $("metricsWeatherStatus").innerHTML = "<div class='weather-status-summary'><span class='weather-symbol'>" + weatherSymbol(latest.conditionGroup) + "</span><span><b>" + escapeHtml(latest.description || latest.conditionGroup) + " · " + escapeHtml(latest.temperatureBand || "") + "</b><small>" + escapeHtml(latest.date) + " · promedio " + formatQuantity(temperatureAverage) + "° · mediana " + formatQuantity(temperatureMedian) + "° · min/max " + formatQuantity(latest.temperatureMin) + "°/" + formatQuantity(latest.temperatureMax) + "°</small></span></div>"
+        + "<strong>" + (latest.hoursObserved || hourlyRows.length || 1) + " h analizadas · " + rows.length + " dia(s)</strong>"
+        + hourlyStrip
+        + "<div class='weather-event-hours'><span><b>Lluvia:</b> " + escapeHtml(rainLabel) + "</span><span><b>Tormenta:</b> " + escapeHtml(stormLabel) + "</span><span><b>Acumulado:</b> " + formatQuantity(latest.precipitation) + " mm</span></div>";
+    } else {
+      $("metricsWeatherStatus").innerHTML = "<div class='weather-status-summary'><span class='weather-symbol'>○</span><span><b>Sin clima guardado en este periodo</b><small>" + (isFinite(Number(configured.latitude)) ? "Se registrara automaticamente cuando haya conexion." : "Autorice una vez la ubicacion de esta PC.") + "</small></span></div>";
+    }
+    var salesByDate = {};
+    (model.currentSales || []).forEach(function (sale) { var date = inferredBusinessDate(sale); salesByDate[date] = (salesByDate[date] || 0) + Number(sale.amount || 0); });
+    function aggregate(field) {
+      var groups = {};
+      rows.forEach(function (row) {
+        var key = row[field] || "Sin clasificar";
+        if (!groups[key]) groups[key] = { label: key, days: 0, sales: 0 };
+        groups[key].days += 1; groups[key].sales += Number(salesByDate[row.date] || 0);
+      });
+      return Object.keys(groups).map(function (key) { groups[key].average = groups[key].days ? groups[key].sales / groups[key].days : 0; return groups[key]; }).sort(function (a, b) { return b.average - a.average; });
+    }
+    function table(title, values) {
+      return "<section><h4>" + title + "</h4>" + (values.length ? "<table><thead><tr><th>Tipo</th><th>Dias</th><th>Ventas</th><th>Promedio/dia</th></tr></thead><tbody>" + values.map(function (row) { return "<tr><td><b>" + escapeHtml(row.label) + "</b></td><td>" + row.days + "</td><td>" + money(row.sales) + "</td><td>" + money(row.average) + "</td></tr>"; }).join("") + "</tbody></table>" : "<p>Faltan dias observados para comparar.</p>") + "</section>";
+    }
+    $("metricsWeatherPerformance").innerHTML = table("Por estado del tiempo", aggregate("conditionGroup")) + table("Por temperatura", aggregate("temperatureBand"));
   }
   function renderMetrics() {
     if (!isAdmin() || !$("metricsKpis")) return;
     var sequence = ++metricsRenderSequence;
-    Promise.all([all("transactions"), all("baskets"), all("basketItems"), all("products"), all("users"), all("closures"), all("auditLog")]).then(function (data) {
+    Promise.all([all("transactions"), all("baskets"), all("basketItems"), all("products"), all("users"), all("closures"), all("auditLog"), all("weatherDaily")]).then(function (data) {
       if (sequence !== metricsRenderSequence) return;
       populateMetricsFilterOptions(data[3], data[4]);
       var filters = metricsSelectedFilters();
@@ -8186,6 +8777,7 @@
       var production = (data.productionItems || []).filter(function (row) { return !row.deleted && reportDateInMonth(row.date || row.createdAt, month); });
       var audits = (data.auditLog || []).filter(function (row) { return reportDateInMonth(row.createdAt, month) && /DELET|UNDO|EDIT|VOID|REVIEW|ADJUST|CORRECT|MANUAL/i.test(String(row.action || "")); });
       var priceRows = (data.priceHistory || []).filter(function (row) { return reportDateInMonth(row.createdAt || row.changedAt || row.actionAt, month); });
+      var weatherRows = (data.weatherDaily || []).filter(function (row) { return reportDateInMonth(row.date, month); }).sort(function (a, b) { return String(a.date).localeCompare(String(b.date)); });
       var year = Number(month.slice(0, 4));
       var monthNumber = Number(month.slice(5, 7));
       var daysInMonth = new Date(year, monthNumber, 0).getDate();
@@ -8299,6 +8891,12 @@
       ]));
       report.push("## Ventas por dia");
       report.push(reportTable(["Fecha", "Tickets", "Ventas", "Efectivo", "QR", "Articulos/lineas"], Object.keys(dayStats).sort().map(function (date) { var row = dayStats[date]; return [date, row.tickets, reportMoney(row.sales), reportMoney(row.cash), reportMoney(row.qr), row.articles]; })));
+      report.push("## Clima y ventas por dia");
+      report.push(reportTable(["Fecha", "Estado", "Temperatura", "Promedio / mediana", "Min / Max", "Horas", "Horas con lluvia", "Lluvia mm", "Ventas"], weatherRows.map(function (row) {
+        var fallbackTemperature = (Number(row.temperatureMin || 0) + Number(row.temperatureMax || 0)) / 2;
+        var rainyHours = Array.isArray(row.rainHours) ? row.rainHours.map(function (time) { return String(time).slice(11, 16); }).join(", ") : "";
+        return [row.date, row.description || row.conditionGroup, row.temperatureBand || "", reportQuantity(row.temperatureAverage != null ? row.temperatureAverage : fallbackTemperature) + " / " + reportQuantity(row.temperatureMedian != null ? row.temperatureMedian : fallbackTemperature), reportQuantity(row.temperatureMin) + " / " + reportQuantity(row.temperatureMax), row.hoursObserved || "Sin detalle", rainyHours || "Ninguna", reportQuantity(row.precipitation), reportMoney(dayStats[row.date] && dayStats[row.date].sales || 0)];
+      })));
       report.push("## Ventas por turno y medio de pago");
       report.push(reportTable(["Segmento", "Tickets", "Importe"], [["Turno AM", shiftStats.AM.tickets, reportMoney(shiftStats.AM.sales)], ["Turno PM", shiftStats.PM.tickets, reportMoney(shiftStats.PM.sales)], ["Efectivo", "", reportMoney(paymentTotals.cash)], ["QR", "", reportMoney(paymentTotals.qr)]]));
       report.push("## Rendimiento de productos");
@@ -8391,6 +8989,7 @@
     if ($("metricsRefreshBtn")) $("metricsRefreshBtn").onclick = renderMetrics;
     if ($("metricsExportBtn")) $("metricsExportBtn").onclick = exportMetricsSnapshot;
     if ($("metricsMonthlyReportBtn")) $("metricsMonthlyReportBtn").onclick = requestMonthlyReport;
+    if ($("weatherLocationBtn")) $("weatherLocationBtn").onclick = requestPcWeatherLocation;
     if ($("metricsProductLimit")) $("metricsProductLimit").onchange = function () {
       metricsProductLimit = Math.max(1, Number($("metricsProductLimit").value || 10));
       if (metricsDashboardModel) renderMetricsProductSections(metricsDashboardModel);
@@ -8419,6 +9018,446 @@
         if (metricsDashboardModel) renderMetricsProductSections(metricsDashboardModel);
       };
     });
+  }
+
+  function stockCountDateValue(dateKey) {
+    var value = new Date(String(dateKey || today()) + "T12:00:00");
+    return isFinite(value.getTime()) ? value : new Date();
+  }
+  function stockCountDaysBetween(from, to) {
+    return Math.floor((stockCountDateValue(to).getTime() - stockCountDateValue(from).getTime()) / 86400000);
+  }
+  function stockCountCampaignInfo(products, results) {
+    var month = monthKey(today());
+    var year = Number(month.slice(0, 4)), monthNumber = Number(month.slice(5, 7));
+    var daysInMonth = new Date(year, monthNumber, 0).getDate();
+    var durationDays = Math.min(daysInMonth, Math.max(14, Math.ceil(products.length / 16)));
+    var deadline = month + "-" + String(durationDays).padStart(2, "0");
+    var activeIds = {};
+    products.forEach(function (product) { activeIds[product.id] = true; });
+    var countedIds = {};
+    (results || []).forEach(function (result) {
+      var resultMonth = monthKey(String(result.submittedAt || result.createdAt || "").slice(0, 10));
+      if (resultMonth === month && activeIds[result.productId]) countedIds[result.productId] = true;
+    });
+    var counted = Object.keys(countedIds).length;
+    var remaining = Math.max(0, products.length - counted);
+    var daysLeft = Math.max(1, stockCountDaysBetween(today(), deadline) + 1);
+    var dailyTarget = remaining ? Math.min(30, Math.max(4, Math.ceil(remaining / daysLeft))) : 0;
+    return {
+      id: "stock-count-campaign-" + month,
+      month: month,
+      totalProducts: products.length,
+      countedProducts: counted,
+      remainingProducts: remaining,
+      durationDays: durationDays,
+      deadline: deadline,
+      dailyTarget: dailyTarget,
+      overdue: today() > deadline && remaining > 0,
+      complete: remaining === 0
+    };
+  }
+  function stockCountLastResultsByProduct(results) {
+    var latest = {};
+    (results || []).forEach(function (result) {
+      var current = latest[result.productId];
+      if (!current || String(result.submittedAt || "") > String(current.submittedAt || "")) latest[result.productId] = result;
+    });
+    return latest;
+  }
+  function saveGeneratedStockCountRows(rows, campaign, priorCampaign) {
+    var campaignChanged = !priorCampaign || Number(priorCampaign.totalProducts || 0) !== campaign.totalProducts || Number(priorCampaign.countedProducts || 0) !== campaign.countedProducts || Number(priorCampaign.dailyTarget || 0) !== campaign.dailyTarget || String(priorCampaign.deadline || "") !== campaign.deadline || !!priorCampaign.complete !== campaign.complete;
+    if (!rows.length && !campaignChanged) return Promise.resolve(false);
+    return dbPromise.then(function (db) { return new Promise(function (resolve, reject) {
+      var transaction = db.transaction(["stockCountMissions", "stockCountCampaigns"], "readwrite");
+      rows.forEach(function (row) { transaction.objectStore("stockCountMissions").put(row); });
+      if (campaignChanged) transaction.objectStore("stockCountCampaigns").put(Object.assign({}, priorCampaign || {}, campaign, { updatedAt: nowIso(), createdAt: priorCampaign && priorCampaign.createdAt || nowIso() }));
+      transaction.oncomplete = function () { scheduleDiskSnapshot(); resolve(true); };
+      transaction.onerror = function () { reject(transaction.error || new Error("No se pudieron preparar los conteos")); };
+      transaction.onabort = function () { reject(transaction.error || new Error("Preparacion de conteos cancelada")); };
+    }); });
+  }
+  function ensureStockCountMissions(products, missions, results, campaigns, users) {
+    var campaign = stockCountCampaignInfo(products, results);
+    var priorCampaign = (campaigns || []).filter(function (row) { return row.id === campaign.id; })[0] || null;
+    var activeProductIds = {};
+    products.forEach(function (product) { activeProductIds[product.id] = true; });
+    var pendingByProduct = {}, pendingRows = [];
+    (missions || []).forEach(function (mission) {
+      if (mission.status !== "PENDING" || !activeProductIds[mission.productId] || pendingByProduct[mission.productId]) return;
+      pendingByProduct[mission.productId] = true;
+      pendingRows.push(mission);
+    });
+    var countedThisMonth = {};
+    (results || []).forEach(function (result) {
+      if (monthKey(String(result.submittedAt || result.createdAt || "").slice(0, 10)) === campaign.month) countedThisMonth[result.productId] = true;
+    });
+    var lastResults = stockCountLastResultsByProduct(results);
+    var completedTodayByProduct = {};
+    (results || []).forEach(function (result) {
+      if (activeProductIds[result.productId] && String(result.submittedAt || result.createdAt || "").slice(0, 10) === today()) completedTodayByProduct[result.productId] = true;
+    });
+    var completedToday = Object.keys(completedTodayByProduct).length;
+    var needed = Math.max(0, campaign.dailyTarget - pendingRows.length - completedToday);
+    var employeeUsers = (users || []).filter(function (user) { return user.active !== false && user.role === "employee"; }).sort(function (a, b) { return String(a.username || "").localeCompare(String(b.username || "")); });
+    var employeeLoad = {};
+    employeeUsers.forEach(function (user) { employeeLoad[user.id] = 0; });
+    pendingRows.forEach(function (mission) { if (employeeLoad[mission.assignedTo] != null) employeeLoad[mission.assignedTo] += 1; });
+    var candidates = products.filter(function (product) { return !countedThisMonth[product.id] && !pendingByProduct[product.id]; }).sort(function (a, b) {
+      var aLast = lastResults[a.id] && lastResults[a.id].submittedAt || "";
+      var bLast = lastResults[b.id] && lastResults[b.id].submittedAt || "";
+      return aLast.localeCompare(bLast) || Number(b.stock || 0) - Number(a.stock || 0) || String(a.name || "").localeCompare(String(b.name || ""));
+    });
+    var generated = candidates.slice(0, needed).map(function (product) {
+      var lastResult = lastResults[product.id];
+      var assignee = employeeUsers.slice().sort(function (a, b) { return employeeLoad[a.id] - employeeLoad[b.id] || String(a.username || "").localeCompare(String(b.username || "")); })[0] || null;
+      if (assignee) employeeLoad[assignee.id] += 1;
+      return {
+        id: "stock-count-" + campaign.month + "-" + product.id,
+        missionDate: today(), campaignMonth: campaign.month, campaignDueDate: campaign.deadline,
+        type: "MONTHLY_DAILY", status: "PENDING", productId: product.id,
+        assignedTo: assignee && assignee.id || "", assignedToName: assignee && (assignee.displayName || assignee.username) || "", assignedUsername: assignee && assignee.username || "",
+        productNameSnapshot: product.name || "Producto", categorySnapshot: productCategory(product), unitTypeSnapshot: product.unitType || product.priceUnit || "unidad",
+        expectedStockSnapshot: moneyPrecision(Number(product.stock || 0)), expectedPriceSnapshot: moneyPrecision(productUnitPrice(product)),
+        productUpdatedAtSnapshot: product.updatedAt || "", lastCountAt: lastResult && lastResult.submittedAt || "",
+        generatedAt: nowIso()
+      };
+    });
+    return saveGeneratedStockCountRows(generated, campaign, priorCampaign);
+  }
+  function setStockCountRequestButtonState(waiting) {
+    var button = $("stockCountRequestMissionBtn");
+    if (!button) return;
+    button.disabled = !!waiting;
+    button.textContent = waiting ? "Preparando..." : "+ Otra mision";
+  }
+  function requestAdditionalStockCountMission() {
+    if (!currentUser || isRequestingStockCountMission) return;
+    isRequestingStockCountMission = true;
+    setStockCountRequestButtonState(true);
+    Promise.all([all("products"), all("stockCountMissions"), all("stockCountResults")]).then(function (sets) {
+      var products = sets[0].filter(function (product) { return product.active !== false; });
+      var productsById = {};
+      products.forEach(function (product) { productsById[product.id] = product; });
+      var pending = sets[1].filter(function (mission) { return mission.status === "PENDING" && productsById[mission.productId]; });
+      var availableForUser = pending.filter(function (mission) {
+        return !mission.assignedTo || mission.assignedTo === currentUser.id || mission.assignedUsername === currentUser.username;
+      }).sort(function (a, b) {
+        return String(a.missionDate || "").localeCompare(String(b.missionDate || "")) || String(a.generatedAt || "").localeCompare(String(b.generatedAt || ""));
+      });
+      if (availableForUser.length) return { id: availableForUser[0].id, existing: true };
+      if (!products.length) throw new Error("No hay productos activos para contar");
+      var pendingByProduct = {};
+      pending.forEach(function (mission) { pendingByProduct[mission.productId] = true; });
+      var lastResults = stockCountLastResultsByProduct(sets[2]);
+      var countedThisMonth = {}, countedToday = {};
+      sets[2].forEach(function (result) {
+        if (!productsById[result.productId]) return;
+        var resultDate = String(result.submittedAt || result.createdAt || "").slice(0, 10);
+        if (monthKey(resultDate) === monthKey(today())) countedThisMonth[result.productId] = true;
+        if (resultDate === today()) countedToday[result.productId] = true;
+      });
+      var candidates = products.filter(function (product) { return !pendingByProduct[product.id]; }).sort(function (a, b) {
+        var aPriority = !countedThisMonth[a.id] ? 0 : !countedToday[a.id] ? 1 : 2;
+        var bPriority = !countedThisMonth[b.id] ? 0 : !countedToday[b.id] ? 1 : 2;
+        var aLast = lastResults[a.id] && lastResults[a.id].submittedAt || "";
+        var bLast = lastResults[b.id] && lastResults[b.id].submittedAt || "";
+        return aPriority - bPriority || aLast.localeCompare(bLast) || Number(b.stock || 0) - Number(a.stock || 0) || String(a.name || "").localeCompare(String(b.name || ""));
+      });
+      if (!candidates.length) throw new Error("Todas las misiones disponibles ya estan asignadas");
+      var product = candidates[0], lastResult = lastResults[product.id], campaign = stockCountCampaignInfo(products, sets[2]), stamp = nowIso();
+      var mission = {
+        id: "stock-count-requested-" + uid(), missionDate: today(), campaignMonth: campaign.month, campaignDueDate: campaign.deadline,
+        type: "EMPLOYEE_REQUESTED", status: "PENDING", productId: product.id,
+        assignedTo: currentUser.id, assignedToName: currentUser.displayName || currentUser.username, assignedUsername: currentUser.username,
+        requestedBy: currentUser.id, requestedAt: stamp,
+        productNameSnapshot: product.name || "Producto", categorySnapshot: productCategory(product), unitTypeSnapshot: product.unitType || product.priceUnit || "unidad",
+        expectedStockSnapshot: moneyPrecision(Number(product.stock || 0)), expectedPriceSnapshot: moneyPrecision(productUnitPrice(product)),
+        productUpdatedAtSnapshot: product.updatedAt || "", lastCountAt: lastResult && lastResult.submittedAt || "", generatedAt: stamp
+      };
+      return dbPromise.then(function (db) { return new Promise(function (resolve, reject) {
+        var transaction = db.transaction(["stockCountMissions", "auditLog"], "readwrite");
+        transaction.objectStore("stockCountMissions").put(mission);
+        transaction.objectStore("auditLog").put({ id: uid(), createdAt: stamp, userId: currentUser.id, username: currentUser.username, action: "STOCK_COUNT_MISSION_REQUESTED", detail: product.id + " | mision voluntaria", severity: "normal" });
+        transaction.oncomplete = function () { scheduleDiskSnapshot(); resolve({ id: mission.id, existing: false }); };
+        transaction.onerror = function () { reject(transaction.error || new Error("No se pudo preparar otra mision")); };
+        transaction.onabort = function () { reject(transaction.error || new Error("La nueva mision fue cancelada")); };
+      }); });
+    }).then(function (mission) {
+      isRequestingStockCountMission = false;
+      setStockCountRequestButtonState(false);
+      if (mission.existing) toast("Ya tiene una mision lista para continuar");
+      renderStockCounts();
+      openStockCountMission(mission.id);
+    }).catch(function (error) {
+      isRequestingStockCountMission = false;
+      setStockCountRequestButtonState(false);
+      toast(error.message || "No se pudo preparar otra mision");
+    });
+  }
+  function stockCountMissionAgeLabel(mission) {
+    if (!mission.lastCountAt) return "Nunca controlado";
+    var days = Math.max(0, stockCountDaysBetween(String(mission.lastCountAt).slice(0, 10), today()));
+    return days === 0 ? "Controlado hoy" : "Hace " + days + " dia" + (days === 1 ? "" : "s");
+  }
+  function stockCountResultIsReview(result) {
+    return result.status === "PENDING_REVIEW";
+  }
+  function renderStockCountMissionRows(pending, productsById) {
+    if (!$("stockCountMissionList")) return;
+    $("stockCountMissionTotal").textContent = String(pending.length);
+    $("stockCountMissionList").innerHTML = pending.length ? pending.slice(0, 60).map(function (mission) {
+      var product = productsById[mission.productId];
+      var stock = product ? Number(product.stock || 0) : Number(mission.expectedStockSnapshot || 0);
+      var price = product ? productUnitPrice(product) : Number(mission.expectedPriceSnapshot || 0);
+      var unit = product && (product.unitType || product.priceUnit) || mission.unitTypeSnapshot || "unidad";
+      var overdue = String(mission.missionDate || "") < today();
+      var assignment = isAdmin() && mission.assignedToName ? " · " + mission.assignedToName : "";
+      return "<article class='stock-count-mission" + (overdue ? " overdue" : "") + "'><div><span>" + escapeHtml(mission.categorySnapshot || "General") + (overdue ? " · Pendiente anterior" : " · Mision de hoy") + escapeHtml(assignment) + "</span><h3>" + escapeHtml(product && product.name || mission.productNameSnapshot) + "</h3><small>" + escapeHtml(stockCountMissionAgeLabel(mission)) + "</small></div>"
+        + "<div class='stock-count-expected-mini'><span>Deberia haber</span><b>" + formatQuantity(stock) + " " + escapeHtml(unitLabel(unit, stock)) + "</b><span>Precio POS</span><b>" + money(price) + " / " + escapeHtml(unit) + "</b></div>"
+        + "<button type='button' data-stock-count-open='" + escapeHtml(mission.id) + "'>Contar ahora</button></article>";
+    }).join("") : empty("No hay misiones pendientes. El inventario asignado esta al dia.");
+    document.querySelectorAll("[data-stock-count-open]").forEach(function (button) { button.onclick = function () { openStockCountMission(button.dataset.stockCountOpen); }; });
+  }
+  function renderStockCountAdmin(results, missions, productsById, usersById, campaign) {
+    var area = $("stockCountAdminArea");
+    if (!area) return;
+    area.classList.toggle("hidden", !isAdmin());
+    if (!isAdmin()) return;
+    var reviews = results.filter(stockCountResultIsReview).sort(function (a, b) { return String(b.submittedAt || "").localeCompare(String(a.submittedAt || "")); });
+    $("stockCountReviewTotal").textContent = String(reviews.length);
+    $("stockCountReviewList").innerHTML = reviews.length ? reviews.map(function (result) {
+      var product = productsById[result.productId];
+      return "<article class='stock-count-review-row'><div><span>" + escapeHtml(result.productNameSnapshot || product && product.name || "Producto") + "</span><small>" + escapeHtml(result.employeeName || "Empleado") + " · " + escapeHtml(String(result.submittedAt || "").slice(0, 16).replace("T", " ")) + "</small></div>"
+        + "<div><span>Stock sistema / contado</span><b>" + formatQuantity(result.expectedStock) + " → " + formatQuantity(result.actualStock) + "</b></div>"
+        + "<div><span>Precio POS / exhibido</span><b>" + money(result.expectedPrice) + " → " + money(result.observedPrice) + "</b></div>"
+        + "<button type='button' data-stock-count-review='" + escapeHtml(result.id) + "'>Revisar</button></article>";
+    }).join("") : empty("No hay diferencias pendientes de revision.");
+    document.querySelectorAll("[data-stock-count-review]").forEach(function (button) { button.onclick = function () { openStockCountReview(button.dataset.stockCountReview); }; });
+    var overdue = missions.filter(function (mission) { return mission.status === "PENDING" && String(mission.missionDate || "") < today(); });
+    var currentMonthResults = results.filter(function (result) { return monthKey(String(result.submittedAt || "").slice(0, 10)) === campaign.month; });
+    var byUser = {};
+    currentMonthResults.forEach(function (result) {
+      var key = result.employeeId || "unknown";
+      if (!byUser[key]) byUser[key] = { count: 0, late: 0, missed: 0, name: result.employeeName || usersById[key] && usersById[key].displayName || "Usuario" };
+      byUser[key].count += 1;
+      if (result.completedLate) byUser[key].late += 1;
+    });
+    overdue.forEach(function (mission) {
+      var key = mission.assignedTo || "unassigned";
+      if (!byUser[key]) byUser[key] = { count: 0, late: 0, missed: 0, name: mission.assignedToName || usersById[key] && usersById[key].displayName || "Sin asignar" };
+      byUser[key].missed += 1;
+    });
+    $("stockCountComplianceList").innerHTML = "<div class='stock-count-deadline-status " + (campaign.overdue || overdue.length ? "late" : "") + "'><b>" + (campaign.complete ? "Ciclo mensual completo" : campaign.overdue ? "Ciclo mensual vencido" : "Fecha limite " + campaign.deadline) + "</b><span>" + overdue.length + " misiones diarias vencidas · " + campaign.remainingProducts + " productos restantes</span></div>"
+      + (Object.keys(byUser).length ? "<div class='stock-count-user-compliance'>" + Object.keys(byUser).map(function (key) { var row = byUser[key]; return "<span><b>" + escapeHtml(row.name) + "</b><small>" + row.count + " conteos" + (row.late ? " · " + row.late + " completados tarde" : "") + (row.missed ? " · " + row.missed + " misiones vencidas" : row.late ? "" : " · en plazo") + "</small></span>"; }).join("") + "</div>" : "<p class='stock-count-empty-note'>Todavia no hay conteos completados este mes.</p>");
+  }
+  function renderStockCountDashboard(products, missions, results, users, campaign) {
+    var productsById = {}, usersById = {};
+    products.forEach(function (product) { productsById[product.id] = product; });
+    users.forEach(function (user) { usersById[user.id] = user; });
+    var allPending = missions.filter(function (mission) { return mission.status === "PENDING" && productsById[mission.productId]; });
+    var pending = allPending.filter(function (mission) {
+      var assignedUser = mission.assignedTo && usersById[mission.assignedTo];
+      return isAdmin() || !mission.assignedTo || !assignedUser || assignedUser.active === false || mission.assignedTo === currentUser.id || mission.assignedUsername === currentUser.username;
+    }).sort(function (a, b) {
+      return String(a.missionDate || "").localeCompare(String(b.missionDate || "")) || String(a.lastCountAt || "").localeCompare(String(b.lastCountAt || ""));
+    });
+    var myToday = results.filter(function (result) { return result.employeeId === currentUser.id && String(result.submittedAt || "").slice(0, 10) === today(); });
+    var reviewCount = results.filter(stockCountResultIsReview).length;
+    $("stockCountSummary").innerHTML = "<article><span>Pendientes</span><b>" + pending.length + "</b><small>Misiones disponibles</small></article>"
+      + "<article><span>Completadas hoy</span><b>" + myToday.length + "</b><small>Por " + escapeHtml(currentUser.displayName || currentUser.username) + "</small></article>"
+      + "<article><span>Progreso mensual</span><b>" + campaign.countedProducts + " / " + campaign.totalProducts + "</b><small>" + (campaign.totalProducts ? Math.round(campaign.countedProducts / campaign.totalProducts * 100) : 100) + "% controlado</small></article>"
+      + "<article class='" + (isAdmin() && reviewCount ? "attention" : "") + "'><span>" + (isAdmin() ? "Para revisar" : "Fecha limite") + "</span><b>" + (isAdmin() ? reviewCount : escapeHtml(campaign.deadline.slice(8, 10) + "/" + campaign.deadline.slice(5, 7))) + "</b><small>" + (isAdmin() ? "Solo administracion" : "Ciclo mensual") + "</small></article>";
+    $("stockCountDeadlineBadge").textContent = campaign.complete ? "Ciclo mensual completo" : "Finaliza " + campaign.deadline + " · objetivo " + campaign.dailyTarget + " por dia";
+    $("stockCountDeadlineBadge").className = campaign.overdue ? "late" : campaign.complete ? "complete" : "";
+    var progress = campaign.totalProducts ? Math.min(100, campaign.countedProducts / campaign.totalProducts * 100) : 100;
+    $("stockCountMonthlyProgress").innerHTML = "<div class='stock-count-progress-ring' style='--progress:" + progress.toFixed(2) + "'><strong>" + Math.round(progress) + "%</strong><span>del inventario</span></div><div class='stock-count-progress-track' title='" + campaign.countedProducts + " de " + campaign.totalProducts + " productos cubiertos'><i style='width:" + progress.toFixed(2) + "%'></i></div><div class='stock-count-progress-copy'><b>" + campaign.remainingProducts + " productos restantes</b><span>" + campaign.countedProducts + " de " + campaign.totalProducts + " productos cubiertos por misiones completadas.</span><span>Otra mision prioriza productos que aun no se contaron este mes.</span></div>";
+    $("stockCountMyActivity").innerHTML = myToday.length ? "<h3>Tu trabajo de hoy</h3>" + myToday.slice(-6).reverse().map(function (result) { return "<span><b>" + escapeHtml(result.productNameSnapshot) + "</b><small>Mision completada · " + escapeHtml(String(result.submittedAt || "").slice(11, 16)) + "</small></span>"; }).join("") : "<p>Los conteos que completes hoy apareceran aqui.</p>";
+    renderStockCountMissionRows(pending, productsById);
+    renderStockCountAdmin(results, missions, productsById, usersById, campaign);
+  }
+  function renderStockCounts() {
+    if (!currentUser || !$("stockCountMissionList")) return;
+    var sequence = ++stockCountRenderSequence;
+    Promise.all([all("products"), all("stockCountMissions"), all("stockCountResults"), all("users"), all("stockCountCampaigns")]).then(function (sets) {
+      if (sequence !== stockCountRenderSequence) return;
+      var products = sets[0].filter(function (product) { return product.active !== false; });
+      return ensureStockCountMissions(products, sets[1], sets[2], sets[4], sets[3]).then(function (changed) {
+        if (!changed) return { products: products, missions: sets[1], results: sets[2], users: sets[3] };
+        return Promise.all([all("stockCountMissions"), all("stockCountCampaigns")]).then(function (fresh) { return { products: products, missions: fresh[0], results: sets[2], users: sets[3] }; });
+      });
+    }).then(function (data) {
+      if (!data || sequence !== stockCountRenderSequence) return;
+      renderStockCountDashboard(data.products, data.missions, data.results, data.users, stockCountCampaignInfo(data.products, data.results));
+    }).catch(function (error) { if (sequence === stockCountRenderSequence) $("stockCountMissionList").innerHTML = empty(error.message || "No se pudieron cargar los conteos."); });
+  }
+  function openStockCountMission(missionId) {
+    Promise.all([all("stockCountMissions"), all("products")]).then(function (sets) {
+      var mission = sets[0].filter(function (row) { return row.id === missionId && row.status === "PENDING"; })[0];
+      var product = mission && sets[1].filter(function (row) { return row.id === mission.productId && row.active !== false; })[0];
+      if (!mission || !product) throw new Error("La mision ya no esta disponible");
+      activeStockCountMission = {
+        mission: mission, productId: product.id, productName: product.name,
+        expectedStock: moneyPrecision(Number(product.stock || 0)), expectedPrice: moneyPrecision(productUnitPrice(product)),
+        unitType: product.unitType || product.priceUnit || "unidad", productUpdatedAt: product.updatedAt || ""
+      };
+      $("stockCountModalTitle").textContent = product.name || "Producto";
+      $("stockCountExpected").innerHTML = "<div><span>Deberia haber</span><b>" + formatQuantity(activeStockCountMission.expectedStock) + " " + escapeHtml(unitLabel(activeStockCountMission.unitType, activeStockCountMission.expectedStock)) + "</b></div><div><span>Precio en el sistema</span><b>" + money(activeStockCountMission.expectedPrice) + " / " + escapeHtml(activeStockCountMission.unitType) + "</b></div>";
+      $("stockCountActual").value = "";
+      $("stockCountObservedPrice").value = "";
+      $("stockCountNote").value = "";
+      $("stockCountModal").classList.remove("hidden");
+      $("stockCountActual").focus();
+    }).catch(function (error) { toast(error.message || "No se pudo abrir la mision"); renderStockCounts(); });
+  }
+  function closeStockCountMission() {
+    $("stockCountModal").classList.add("hidden");
+    activeStockCountMission = null;
+  }
+  function submitStockCountMission(event) {
+    event.preventDefault();
+    if (!activeStockCountMission || !currentUser) return;
+    var actualText = $("stockCountActual").value.trim(), priceText = $("stockCountObservedPrice").value.trim();
+    var actualStock = parseMoney(actualText), observedPrice = parseMoney(priceText);
+    if (!actualText || actualStock < 0) { toast("Ingrese la cantidad fisica contada"); $("stockCountActual").focus(); return; }
+    if (!priceText || observedPrice < 0) { toast("Ingrese el precio exhibido"); $("stockCountObservedPrice").focus(); return; }
+    var draft = Object.assign({}, activeStockCountMission), stamp = nowIso();
+    Promise.all([all("stockCountMissions"), all("products")]).then(function (sets) {
+      var mission = sets[0].filter(function (row) { return row.id === draft.mission.id && row.status === "PENDING"; })[0];
+      var product = mission && sets[1].filter(function (row) { return row.id === draft.productId && row.active !== false; })[0];
+      if (!mission || !product) throw new Error("La mision ya fue completada o el producto cambio");
+      var stockMismatch = Math.abs(actualStock - draft.expectedStock) > .009;
+      var priceMismatch = Math.abs(observedPrice - draft.expectedPrice) > .009;
+      var concurrentChange = String(product.updatedAt || "") !== String(draft.productUpdatedAt || "") || Math.abs(Number(product.stock || 0) - draft.expectedStock) > .009 || Math.abs(productUnitPrice(product) - draft.expectedPrice) > .009;
+      var requiresReview = stockMismatch || priceMismatch || concurrentChange;
+      var result = {
+        id: uid(), missionId: mission.id, campaignMonth: monthKey(today()), productId: product.id,
+        productNameSnapshot: product.name || mission.productNameSnapshot, categorySnapshot: productCategory(product), unitTypeSnapshot: draft.unitType,
+        expectedStock: draft.expectedStock, actualStock: moneyPrecision(actualStock), stockDifference: moneyPrecision(actualStock - draft.expectedStock),
+        expectedPrice: draft.expectedPrice, observedPrice: moneyPrecision(observedPrice), priceDifference: moneyPrecision(observedPrice - draft.expectedPrice),
+        productUpdatedAtAtOpen: draft.productUpdatedAt, productUpdatedAtAtSubmit: product.updatedAt || "", concurrentChange: concurrentChange,
+        status: requiresReview ? "PENDING_REVIEW" : "VERIFIED", employeeVisibleStatus: "COMPLETED",
+        employeeId: currentUser.id, employeeName: currentUser.displayName || currentUser.username, employeeUsername: currentUser.username,
+        note: $("stockCountNote").value.trim(), completedLate: String(mission.missionDate || "") < today(), submittedAt: stamp
+      };
+      mission = Object.assign({}, mission, { status: "COMPLETED", resultId: result.id, completedAt: stamp, completedBy: currentUser.id, completedByName: result.employeeName });
+      return dbPromise.then(function (db) { return new Promise(function (resolve, reject) {
+        var transaction = db.transaction(["stockCountMissions", "stockCountResults", "auditLog"], "readwrite");
+        var check = transaction.objectStore("stockCountMissions").get(mission.id);
+        check.onsuccess = function () {
+          if (!check.result || check.result.status !== "PENDING") { transaction.abort(); return; }
+          transaction.objectStore("stockCountMissions").put(mission);
+          transaction.objectStore("stockCountResults").put(result);
+          transaction.objectStore("auditLog").put({ id: uid(), createdAt: stamp, userId: currentUser.id, username: currentUser.username, action: "STOCK_COUNT_SUBMITTED", detail: product.id + " | mision " + mission.id, severity: "normal" });
+        };
+        transaction.oncomplete = function () { scheduleDiskSnapshot(); resolve(result); };
+        transaction.onerror = function () { reject(transaction.error || new Error("No se pudo guardar el conteo")); };
+        transaction.onabort = function () { reject(new Error("La mision ya fue procesada")); };
+      }); });
+    }).then(function () {
+      closeStockCountMission();
+      toast("Conteo enviado. Mision completada.");
+      renderStockCounts();
+    }).catch(function (error) { toast(error.message || "No se pudo enviar el conteo"); });
+  }
+  function stockCountKnownLossEstimate(product, finalStock) {
+    var currentStock = Math.max(0, Number(product && product.stock || 0));
+    var shortage = Math.max(0, currentStock - Number(finalStock || 0));
+    var pools = productCostPools(product || {}), unknownRemoved = Math.min(pools.unknown, shortage), remaining = Math.max(0, shortage - unknownRemoved);
+    var knownRemoved = Math.min(pools.known, remaining), averageCost = pools.known > 0 ? pools.value / pools.known : 0;
+    return { shortage: shortage, knownQuantity: knownRemoved, unknownQuantity: moneyPrecision(unknownRemoved + Math.max(0, remaining - knownRemoved)), knownCost: moneyPrecision(knownRemoved * averageCost), averageCost: moneyPrecision(averageCost) };
+  }
+  function openStockCountReview(resultId) {
+    if (!isAdmin()) return;
+    Promise.all([all("stockCountResults"), all("products")]).then(function (sets) {
+      var result = sets[0].filter(function (row) { return row.id === resultId && row.status === "PENDING_REVIEW"; })[0];
+      var product = result && sets[1].filter(function (row) { return row.id === result.productId; })[0];
+      if (!result || !product) throw new Error("La revision ya no esta disponible");
+      var loss = stockCountKnownLossEstimate(product, result.actualStock);
+      $("stockCountReviewId").value = result.id;
+      $("stockCountReviewTitle").textContent = product.name || result.productNameSnapshot;
+      $("stockCountFinalStock").value = String(result.actualStock).replace(".", ",");
+      $("stockCountFinalPrice").value = String(result.observedPrice).replace(".", ",");
+      $("stockCountAdminNote").value = "";
+      $("stockCountReviewDetail").innerHTML = "<div><span>Informado por</span><b>" + escapeHtml(result.employeeName || "Empleado") + "</b></div><div><span>Stock esperado / contado</span><b>" + formatQuantity(result.expectedStock) + " → " + formatQuantity(result.actualStock) + "</b></div><div><span>Stock actual del sistema</span><b>" + formatQuantity(product.stock) + " " + escapeHtml(unitLabel(product.unitType || product.priceUnit, product.stock)) + "</b></div><div><span>Precio POS / exhibido</span><b>" + money(result.expectedPrice) + " → " + money(result.observedPrice) + "</b></div><div><span>Perdida conocida estimada</span><b>" + (loss.knownCost ? money(loss.knownCost) : loss.shortage ? "Costo desconocido" : "Sin faltante") + "</b></div>";
+      $("stockCountReviewModal").classList.remove("hidden");
+      $("stockCountFinalStock").focus();
+    }).catch(function (error) { toast(error.message || "No se pudo abrir la revision"); renderStockCounts(); });
+  }
+  function closeStockCountReview() {
+    $("stockCountReviewModal").classList.add("hidden");
+    $("stockCountReviewId").value = "";
+  }
+  function resolveStockCountWithoutChange() {
+    if (!isAdmin()) return;
+    var resultId = $("stockCountReviewId").value;
+    all("stockCountResults").then(function (results) {
+      var result = results.filter(function (row) { return row.id === resultId && row.status === "PENDING_REVIEW"; })[0];
+      if (!result) throw new Error("La revision ya fue resuelta");
+      result.status = "RESOLVED_NO_CHANGE"; result.reviewedAt = nowIso(); result.reviewedBy = currentUser.id; result.reviewedByName = currentUser.displayName || currentUser.username; result.adminNote = $("stockCountAdminNote").value.trim();
+      return add("stockCountResults", result).then(function () { return audit("STOCK_COUNT_RESOLVED_NO_CHANGE", result.productId, "warning"); });
+    }).then(function () { closeStockCountReview(); renderStockCounts(); toast("Revision cerrada sin cambios"); }).catch(function (error) { toast(error.message || "No se pudo cerrar la revision"); });
+  }
+  function applyStockCountReview(event) {
+    event.preventDefault();
+    if (!isAdmin()) return;
+    var resultId = $("stockCountReviewId").value;
+    var stockText = $("stockCountFinalStock").value.trim(), priceText = $("stockCountFinalPrice").value.trim();
+    var finalStock = parseMoney(stockText), finalPrice = parseMoney(priceText);
+    if (!stockText || finalStock < 0) { toast("Ingrese el stock definitivo"); return; }
+    if (!priceText || finalPrice < 0) { toast("Ingrese el precio definitivo"); return; }
+    Promise.all([all("stockCountResults"), all("products")]).then(function (sets) {
+      var result = sets[0].filter(function (row) { return row.id === resultId && row.status === "PENDING_REVIEW"; })[0];
+      var product = result && sets[1].filter(function (row) { return row.id === result.productId; })[0];
+      if (!result || !product) throw new Error("La revision ya fue resuelta o falta el producto");
+      product = Object.assign({}, product);
+      var beforeState = purchaseProductState(product), oldStock = Math.max(0, Number(product.stock || 0)), oldPrice = productUnitPrice(product), delta = moneyPrecision(finalStock - oldStock);
+      var pools = productCostPools(product), knownLoss = 0, knownRemoved = 0, unknownRemoved = 0;
+      if (delta < 0) {
+        var shortage = Math.abs(delta);
+        unknownRemoved = Math.min(pools.unknown, shortage);
+        var remaining = Math.max(0, shortage - unknownRemoved);
+        knownRemoved = Math.min(pools.known, remaining);
+        var averageCost = pools.known > 0 ? pools.value / pools.known : 0;
+        knownLoss = moneyPrecision(knownRemoved * averageCost);
+        unknownRemoved = moneyPrecision(unknownRemoved + Math.max(0, remaining - knownRemoved));
+        pools.unknown = Math.max(0, pools.unknown - Math.min(pools.unknown, shortage));
+        pools.known = Math.max(0, pools.known - knownRemoved);
+        pools.value = Math.max(0, pools.value - knownLoss);
+      } else if (delta > 0) pools.unknown += delta;
+      product.stock = moneyPrecision(finalStock);
+      product.price = moneyPrecision(finalPrice);
+      applyCostPools(product, pools);
+      product.updatedAt = nowIso();
+      var afterState = purchaseProductState(product), stamp = nowIso();
+      var unknownLoss = delta < 0 ? unknownRemoved : 0;
+      result.status = unknownLoss > .009 ? "RESOLVED_COST_PENDING" : "RESOLVED";
+      result.reviewedAt = stamp; result.reviewedBy = currentUser.id; result.reviewedByName = currentUser.displayName || currentUser.username;
+      result.finalStock = product.stock; result.finalPrice = product.price; result.appliedStockDifference = delta; result.knownLossAmount = knownLoss; result.unknownLossQuantity = unknownLoss; result.adminNote = $("stockCountAdminNote").value.trim();
+      var movement = { id: uid(), type: "COUNT_ADJUSTMENT", productId: product.id, quantity: delta, knownCostQuantity: -knownRemoved, unknownCostQuantity: -unknownRemoved, knownCostValue: -knownLoss, referenceType: "STOCK_COUNT", referenceId: result.id, beforeState: beforeState, afterState: afterState, createdAt: stamp, createdBy: currentUser.id };
+      var lossEntry = knownLoss > .009 ? { id: "stock-count-loss-" + result.id, type: "EXPENSE", date: today(), amount: knownLoss, category: "Perdida", description: "Faltante confirmado: " + product.name + " (" + formatQuantity(Math.abs(delta)) + " " + unitLabel(product.unitType || product.priceUnit, Math.abs(delta)) + ")", sourceType: "STOCK_COUNT", sourceId: result.id, createdAt: stamp, createdBy: currentUser.id } : null;
+      if (lossEntry) result.lossEntryId = lossEntry.id;
+      var priceRow = Math.abs(finalPrice - oldPrice) > .009 ? { id: uid(), productId: product.id, productName: product.name, previousPrice: oldPrice, newPrice: finalPrice, sourceType: "STOCK_COUNT", sourceId: result.id, createdAt: stamp, createdBy: currentUser.id } : null;
+      return dbPromise.then(function (db) { return new Promise(function (resolve, reject) {
+        var transaction = db.transaction(["stockCountResults", "products", "inventoryMovements", "monthlyEntries", "priceHistory", "auditLog"], "readwrite");
+        var check = transaction.objectStore("stockCountResults").get(result.id);
+        check.onsuccess = function () {
+          if (!check.result || check.result.status !== "PENDING_REVIEW") { transaction.abort(); return; }
+          transaction.objectStore("stockCountResults").put(result);
+          transaction.objectStore("products").put(product);
+          transaction.objectStore("inventoryMovements").put(movement);
+          if (lossEntry) transaction.objectStore("monthlyEntries").put(lossEntry);
+          if (priceRow) transaction.objectStore("priceHistory").put(priceRow);
+          transaction.objectStore("auditLog").put({ id: uid(), createdAt: stamp, userId: currentUser.id, username: currentUser.username, action: "STOCK_COUNT_CORRECTION_APPLIED", detail: product.id + " | stock " + formatQuantity(oldStock) + " -> " + formatQuantity(finalStock) + " | precio " + money(oldPrice) + " -> " + money(finalPrice) + (unknownLoss ? " | costo desconocido" : ""), severity: "critical" });
+        };
+        transaction.oncomplete = function () { invalidateProductSearchCache(); scheduleDiskSnapshot(); resolve(result); };
+        transaction.onerror = function () { reject(transaction.error || new Error("No se pudo aplicar la correccion")); };
+        transaction.onabort = function () { reject(new Error("La revision ya fue procesada")); };
+      }); });
+    }).then(function (result) {
+      closeStockCountReview(); renderAll();
+      toast(result.unknownLossQuantity ? "Stock corregido; costo desconocido pendiente" : result.knownLossAmount ? "Stock corregido y perdida registrada" : "Stock y precio verificados");
+    }).catch(function (error) { toast(error.message || "No se pudo aplicar la correccion"); });
   }
 
   function activityTone(a) {
@@ -9146,7 +10185,7 @@
   }
   function purchaseNewLine(productId) {
     var product = supplierProductsCache.filter(function (row) { return row.id === productId; })[0] || {};
-    return { id: uid(), productId: product.id || "", productNameSnapshot: product.name || "", productCategorySnapshot: productCategory(product), supplierDescription: "", supplierProductCode: "", packagesReceived: 1, bonusPackages: 0, packageSize: 1, purchaseUnit: "unidad", saleUnit: product.unitType || product.priceUnit || "unidad", costPerPackage: 0, grossSubtotal: 0, totalSaleQuantity: 1, costPerSaleUnit: 0, status: "ACTIVE" };
+    return { id: uid(), productId: product.id || "", productNameSnapshot: product.name || "", productCategorySnapshot: productCategory(product), supplierDescription: "", supplierProductCode: "", packagesReceived: 1, bonusPackages: 0, packageSize: 1, purchaseUnit: "unidad", saleUnit: product.unitType || product.priceUnit || "unidad", costPerPackage: 0, lineDiscount: 0, grossSubtotal: 0, totalSaleQuantity: 1, costPerSaleUnit: 0, status: "ACTIVE" };
   }
   function purchaseLineRow(line, index) {
     var units = ["bolsa", "caja", "botella", "bidon", "unidad", "paquete", "fardo", "lata", "tambor", "rollo"];
@@ -9159,13 +10198,14 @@
       + "<select data-purchase-line-field='purchaseUnit' aria-label='Unidad de compra'>" + units.map(function (unit) { return "<option value='" + unit + "' " + (line.purchaseUnit === unit ? "selected" : "") + ">" + unit + "</option>"; }).join("") + "</select>"
       + "<input data-purchase-line-field='bonusPackages' inputmode='decimal' aria-label='Paquetes bonificados' value='" + escapeHtml(formatQuantity(line.bonusPackages || 0)) + "'>"
       + "<input data-purchase-line-field='costPerPackage' inputmode='decimal' aria-label='Costo por paquete' value='" + escapeHtml(line.costPerPackage ? String(line.costPerPackage).replace(".", ",") : "") + "' placeholder='$ 0'>"
+      + "<input data-purchase-line-field='lineDiscount' inputmode='decimal' aria-label='Descuento individual del producto' value='" + escapeHtml(line.lineDiscount ? String(line.lineDiscount).replace(".", ",") : "") + "' placeholder='$ 0'>"
       + "<div class='purchase-line-calculated'><b data-purchase-line-total>" + money(line.grossSubtotal) + "</b><span data-purchase-line-unit-cost>" + moneyCost(line.costPerSaleUnit) + " / " + escapeHtml(line.saleUnit || "unidad") + "</span><span data-purchase-line-quantity>" + formatQuantity(line.totalSaleQuantity) + " " + escapeHtml(line.saleUnit || "unidad") + "</span></div>"
       + "<button type='button' data-remove-purchase-line='" + index + "' aria-label='Quitar linea'>&times;</button></div>";
   }
   function purchaseReadLineRow(row, line) {
     row.querySelectorAll("[data-purchase-line-field]").forEach(function (input) {
       var field = input.dataset.purchaseLineField;
-      if (["packagesReceived", "packageSize", "bonusPackages", "costPerPackage"].indexOf(field) >= 0) line[field] = Math.max(0, parseMoney(input.value));
+      if (["packagesReceived", "packageSize", "bonusPackages", "costPerPackage", "lineDiscount"].indexOf(field) >= 0) line[field] = Math.max(0, parseMoney(input.value));
       else line[field] = input.value;
     });
     var product = supplierProductsCache.filter(function (entry) { return entry.id === line.productId; })[0] || {};
@@ -9174,7 +10214,7 @@
     line.saleUnit = product.unitType || product.priceUnit || line.saleUnit || "unidad";
     line.totalSaleQuantity = moneyPrecision((Number(line.packagesReceived || 0) + Number(line.bonusPackages || 0)) * Number(line.packageSize || 0));
     line.grossSubtotal = moneyPrecision(Number(line.packagesReceived || 0) * Number(line.costPerPackage || 0));
-    line.costPerSaleUnit = line.totalSaleQuantity > 0 ? moneyPrecision(line.grossSubtotal / line.totalSaleQuantity) : 0;
+    line.costPerSaleUnit = line.totalSaleQuantity > 0 ? moneyPrecision(Math.max(0, line.grossSubtotal - Number(line.lineDiscount || 0)) / line.totalSaleQuantity) : 0;
     line.lineSubtotal = line.grossSubtotal;
     line.updatedAt = nowIso();
     line.updatedBy = currentUser.id;
@@ -9207,12 +10247,14 @@
   function purchaseTotalsFromForm() {
     var lines = purchaseCaptureLines();
     var subtotal = moneyPrecision(lines.reduce(function (sumValue, line) { return sumValue + Number(line.grossSubtotal || 0); }, 0));
+    var lineDiscountTotal = moneyPrecision(lines.reduce(function (sumValue, line) { return sumValue + Math.min(Number(line.grossSubtotal || 0), Number(line.lineDiscount || 0)); }, 0));
     var discounts = Math.max(0, parseMoney($("purchaseDiscount").value));
     var freight = Math.max(0, parseMoney($("purchaseFreight").value));
     var taxes = Math.max(0, parseMoney($("purchaseTaxes").value));
     var otherCosts = Math.max(0, parseMoney($("purchaseOtherCosts").value));
-    var total = moneyPrecision(Math.max(0, subtotal - discounts + freight + taxes + otherCosts));
-    return { subtotal: subtotal, discounts: discounts, freight: freight, taxes: taxes, otherCosts: otherCosts, total: total };
+    var netProductsTotal = moneyPrecision(Math.max(0, subtotal - lineDiscountTotal));
+    var total = moneyPrecision(Math.max(0, netProductsTotal - discounts + freight + taxes + otherCosts));
+    return { subtotal: subtotal, lineDiscountTotal: lineDiscountTotal, netProductsTotal: netProductsTotal, discounts: discounts, freight: freight, taxes: taxes, otherCosts: otherCosts, total: total };
   }
   function purchaseUpdateCalculations() {
     if (!purchaseEditorDraft) return;
@@ -9224,11 +10266,12 @@
       var total = row.querySelector("[data-purchase-line-total]");
       var unitCost = row.querySelector("[data-purchase-line-unit-cost]");
       var quantity = row.querySelector("[data-purchase-line-quantity]");
-      if (total) total.textContent = money(line.grossSubtotal);
+      if (total) total.textContent = money(Math.max(0, Number(line.grossSubtotal || 0) - Number(line.lineDiscount || 0)));
       if (unitCost) unitCost.textContent = moneyCost(line.costPerSaleUnit) + " / " + line.saleUnit;
       if (quantity) quantity.textContent = formatQuantity(line.totalSaleQuantity) + " " + line.saleUnit;
     });
     $("purchaseSubtotal").textContent = money(totals.subtotal);
+    if ($("purchaseLineDiscountTotal")) $("purchaseLineDiscountTotal").textContent = "- " + money(totals.lineDiscountTotal);
     $("purchaseAdjustmentsTotal").textContent = money(-totals.discounts + totals.freight + totals.taxes + totals.otherCosts);
     $("purchaseGrandTotal").textContent = money(totals.total);
     var declaredRaw = $("purchaseDeclaredTotal").value.trim();
@@ -9443,8 +10486,8 @@
     var purchase = draft.purchase;
     var lines = draft.lines;
     $("purchaseConfirmSummary").innerHTML = "<header class='purchase-confirm-header'><div><h3>" + escapeHtml(supplierNameById(purchase.supplierId, purchase.supplierSnapshot)) + "</h3><p>" + purchaseDateLabel(purchase.deliveryDate) + (purchase.invoiceNumber ? " · Factura " + escapeHtml(purchase.invoiceNumber) : " · Sin numero de factura") + "</p></div><strong class='purchase-confirm-total'>" + money(purchase.total) + "</strong></header>"
-      + "<div class='purchase-confirm-lines'>" + lines.map(function (line) { var pureBonus = Number(line.packagesReceived || 0) === 0 && Number(line.bonusPackages || 0) > 0; var adjustedBonus = pureBonus && Number(line.landedLineCost || 0) > .009; return "<div class='purchase-confirm-line'><b>" + escapeHtml(purchaseProductName(line)) + (pureBonus ? "<small>Producto bonificado" + (adjustedBonus ? " · con costos de factura asignados" : " · sin cargo") + "</small>" : "") + "</b><span>" + (pureBonus ? "Bonificada: " + formatQuantity(line.bonusPackages) + " " + escapeHtml(unitLabel(line.purchaseUnit, line.bonusPackages)) : formatQuantity(line.packagesReceived) + " " + escapeHtml(unitLabel(line.purchaseUnit, line.packagesReceived)) + (line.bonusPackages ? " + " + formatQuantity(line.bonusPackages) + " bonif." : "")) + "</span><span>" + (pureBonus && !adjustedBonus ? "Sin cargo" : moneyCost(line.costPerSaleUnit) + " / " + escapeHtml(line.saleUnit)) + "</span><strong class='purchase-stock-change'>Stock +" + formatQuantity(line.totalSaleQuantity) + " " + escapeHtml(line.saleUnit) + "</strong></div>"; }).join("") + "</div>"
-      + "<section class='purchase-detail-meta'><div><span>Subtotal</span><b>" + money(purchase.subtotal) + "</b></div><div><span>Descuento</span><b>" + money(purchase.discounts) + "</b></div><div><span>Flete + recargos</span><b>" + money(Number(purchase.freight || 0) + Number(purchase.taxes || 0) + Number(purchase.otherCosts || 0)) + "</b></div><div><span>Factura adjunta</span><b>" + (purchaseInvoiceData || purchaseAttachmentRef || purchase.attachmentRef || purchase.attachment ? "Si" : "No") + "</b></div></section>";
+      + "<div class='purchase-confirm-lines'>" + lines.map(function (line) { var pureBonus = Number(line.packagesReceived || 0) === 0 && Number(line.bonusPackages || 0) > 0; var adjustedBonus = pureBonus && Number(line.landedLineCost || 0) > .009; return "<div class='purchase-confirm-line'><b>" + escapeHtml(purchaseProductName(line)) + (pureBonus ? "<small>Producto bonificado" + (adjustedBonus ? " · con costos de factura asignados" : " · sin cargo") + "</small>" : Number(line.lineDiscount || 0) > 0 ? "<small>Descuento individual: - " + money(line.lineDiscount) + "</small>" : "") + "</b><span>" + (pureBonus ? "Bonificada: " + formatQuantity(line.bonusPackages) + " " + escapeHtml(unitLabel(line.purchaseUnit, line.bonusPackages)) : formatQuantity(line.packagesReceived) + " " + escapeHtml(unitLabel(line.purchaseUnit, line.packagesReceived)) + (line.bonusPackages ? " + " + formatQuantity(line.bonusPackages) + " bonif." : "")) + "</span><span>" + (pureBonus && !adjustedBonus ? "Sin cargo" : moneyCost(line.costPerSaleUnit) + " / " + escapeHtml(line.saleUnit)) + "</span><strong class='purchase-stock-change'>Stock +" + formatQuantity(line.totalSaleQuantity) + " " + escapeHtml(line.saleUnit) + "</strong></div>"; }).join("") + "</div>"
+      + "<section class='purchase-detail-meta'><div><span>Subtotal</span><b>" + money(purchase.subtotal) + "</b></div><div><span>Descuentos por producto</span><b>" + money(purchase.lineDiscountTotal) + "</b></div><div><span>Descuento de factura</span><b>" + money(purchase.discounts) + "</b></div><div><span>Flete + recargos</span><b>" + money(Number(purchase.freight || 0) + Number(purchase.taxes || 0) + Number(purchase.otherCosts || 0)) + "</b></div><div><span>Factura adjunta</span><b>" + (purchaseInvoiceData || purchaseAttachmentRef || purchase.attachmentRef || purchase.attachment ? "Si" : "No") + "</b></div></section>";
   }
   function purchaseReviewConfirmation() {
     var draft = purchaseCaptureDraftFromForm();
@@ -9495,7 +10538,7 @@
     var statusClass = purchaseStatusClass(purchase.status);
     $("purchaseDetailContent").innerHTML = "<header class='purchase-detail-header'><div><span class='suppliers-eyebrow'>Pedido recibido</span><h2 id='purchaseDetailTitle'>" + escapeHtml(supplierNameById(purchase.supplierId, purchase.supplierSnapshot)) + "</h2><p>" + purchaseDateLabel(purchase.deliveryDate) + (purchase.invoiceNumber ? " · Factura " + escapeHtml(purchase.invoiceNumber) : " · Sin factura") + "</p></div><div><span class='purchase-status " + statusClass + "'>" + purchaseStatusLabel(purchase.status) + "</span><strong class='purchase-confirm-total'>" + money(purchase.total) + "</strong></div></header>"
       + "<section class='purchase-detail-meta'><div><span>Condicion de pago</span><b>" + escapeHtml(purchase.paymentTerms || purchase.paymentMethod || "Sin indicar") + "</b></div><div><span>Vencimiento</span><b>" + (purchase.dueDate ? purchaseDateLabel(purchase.dueDate) : "Sin vencimiento") + "</b></div><div><span>Operador</span><b>" + escapeHtml(purchase.confirmedByName || purchase.updatedByName || purchase.createdByName || "Usuario registrado") + "</b></div><div><span>Revision</span><b>" + escapeHtml(String(purchase.revision || 1)) + "</b></div></section>"
-      + "<section class='supplier-profile-section'><h3>Productos</h3><div class='purchase-detail-lines'>" + lines.map(function (line) { return "<div class='purchase-detail-line'><b>" + escapeHtml(purchaseProductName(line)) + "<small>" + escapeHtml([line.supplierDescription, line.supplierProductCode].filter(Boolean).join(" · ")) + "</small></b><span>" + formatQuantity(line.packagesReceived) + " " + escapeHtml(unitLabel(line.purchaseUnit, line.packagesReceived)) + (line.bonusPackages ? " + " + formatQuantity(line.bonusPackages) + " bonif." : "") + "</span><span>" + formatQuantity(line.totalSaleQuantity) + " " + escapeHtml(line.saleUnit) + " · " + moneyCost(line.costPerSaleUnit) + "/" + escapeHtml(line.saleUnit) + "</span><strong>" + money(line.landedLineCost || line.grossSubtotal) + "</strong></div>"; }).join("") + "</div></section>"
+      + "<section class='supplier-profile-section'><h3>Productos</h3><div class='purchase-detail-lines'>" + lines.map(function (line) { return "<div class='purchase-detail-line'><b>" + escapeHtml(purchaseProductName(line)) + "<small>" + escapeHtml([line.supplierDescription, line.supplierProductCode].filter(Boolean).join(" · ")) + (Number(line.lineDiscount || 0) > 0 ? " · Descuento " + money(line.lineDiscount) : "") + "</small></b><span>" + formatQuantity(line.packagesReceived) + " " + escapeHtml(unitLabel(line.purchaseUnit, line.packagesReceived)) + (line.bonusPackages ? " + " + formatQuantity(line.bonusPackages) + " bonif." : "") + "</span><span>" + formatQuantity(line.totalSaleQuantity) + " " + escapeHtml(line.saleUnit) + " · " + moneyCost(line.costPerSaleUnit) + "/" + escapeHtml(line.saleUnit) + "</span><strong>" + money(line.landedLineCost || line.grossSubtotal) + "</strong></div>"; }).join("") + "</div></section>"
       + "<section class='purchase-detail-meta'><div><span>Subtotal</span><b>" + money(purchase.subtotal) + "</b></div><div><span>Descuento</span><b>" + money(purchase.discounts) + "</b></div><div><span>Flete / impuestos / otros</span><b>" + money(Number(purchase.freight || 0) + Number(purchase.taxes || 0) + Number(purchase.otherCosts || 0)) + "</b></div><div><span>Total final</span><b>" + money(purchase.total) + "</b></div></section>"
       + (purchase.notes ? "<p class='modal-note'>" + escapeHtml(purchase.notes) + "</p>" : "")
       + (purchase.attachmentRef || purchase.attachment ? "<section class='purchase-invoice-image'><h3>Factura o remito adjunto</h3><div id='purchaseDetailInvoiceImage'><span>Cargando factura...</span></div></section>" : "");
@@ -9674,11 +10717,30 @@
     if (currentTab === "Balance") renderMonthly();
     if (currentTab === "Produccion") renderProduction();
     if (currentTab === "Proveedores") renderSuppliers();
+    if (currentTab === "MercadoLibre" && window.MercadoLibreModule) window.MercadoLibreModule.onActivate();
     if (currentTab === "Metricas") renderMetrics();
     if (currentTab === "Movimientos") renderMovements();
-    if (currentTab === "Actividad") renderActivity();
+    if (currentTab === "Conteos") renderStockCounts();
     if (currentTab === "Usuarios" || currentTab === "Dev") renderAdmin();
     if (currentTab === "Dev") renderDev();
+  }
+  function configureMercadoLibreModule() {
+    if (!window.MercadoLibreModule) return;
+    window.MercadoLibreModule.configure({
+      all: all,
+      add: add,
+      addMany: addMany,
+      audit: audit,
+      request: mercadoLibreRequest,
+      commitPublication: commitMercadoLibrePublication,
+      isAdmin: isAdmin,
+      getCurrentUser: function () { return currentUser; },
+      escapeHtml: escapeHtml,
+      toast: toast,
+      uid: uid,
+      nowIso: nowIso,
+      money: money
+    });
   }
   function renderDev() {
     if (!isDev()) return;
@@ -9842,6 +10904,12 @@
     if ($("userEditForm")) $("userEditForm").onsubmit = saveUserEdit;
     if ($("closeUserEditModal")) $("closeUserEditModal").onclick = closeUserEdit;
     if ($("deleteUserBtn")) $("deleteUserBtn").onclick = function () { deleteUser($("editUserId").value); };
+    if ($("stockCountForm")) $("stockCountForm").onsubmit = submitStockCountMission;
+    if ($("stockCountRequestMissionBtn")) $("stockCountRequestMissionBtn").onclick = requestAdditionalStockCountMission;
+    if ($("closeStockCountModal")) $("closeStockCountModal").onclick = closeStockCountMission;
+    if ($("stockCountReviewForm")) $("stockCountReviewForm").onsubmit = applyStockCountReview;
+    if ($("closeStockCountReviewModal")) $("closeStockCountReviewModal").onclick = closeStockCountReview;
+    if ($("resolveStockCountNoChangeBtn")) $("resolveStockCountNoChangeBtn").onclick = resolveStockCountWithoutChange;
     $("exportBtn").onclick = exportData;
     $("integrationForm").onsubmit = saveIntegrationSettings;
     if ($("ticketConfigForm")) $("ticketConfigForm").onsubmit = saveTicketSettings;
@@ -10019,10 +11087,20 @@
     $("cropY").oninput = updateCropPreview;
     $("productPriceInput").oninput = updateProductModalTotal;
     $("productQuantityInput").oninput = updateProductModalTotal;
-    document.querySelectorAll("[data-product-weight]").forEach(function (button) {
-      button.onclick = function () {
+    if ($("productWeightQuick")) $("productWeightQuick").onclick = function (event) {
+      var button = event.target && event.target.closest && event.target.closest("[data-product-weight]");
+      if (button) {
+        productEntryMode = "quantity";
         $("productQuantityInput").value = String(button.dataset.productWeight).replace(".", ",");
         updateProductModalTotal();
+        $("productQuantityInput").focus();
+      }
+    };
+    document.querySelectorAll("[data-product-entry-mode]").forEach(function (button) {
+      button.onclick = function () {
+        productEntryMode = button.dataset.productEntryMode === "money" ? "money" : "quantity";
+        $("productQuantityInput").value = "";
+        renderProductQuantityOptions();
         $("productQuantityInput").focus();
       };
     });
@@ -10036,6 +11114,18 @@
     $("ticketPaid").oninput = renderBasket;
     if ($("ticketSplitCash")) $("ticketSplitCash").oninput = renderBasket;
     if ($("ticketPaymentSelect")) $("ticketPaymentSelect").onchange = renderBasket;
+    if ($("ticketDiscountValue")) $("ticketDiscountValue").oninput = function () {
+      ticketDiscount.value = Math.max(0, parseMoney($("ticketDiscountValue").value));
+      renderBasket();
+    };
+    document.querySelectorAll("[data-ticket-discount-type]").forEach(function (button) {
+      button.onclick = function () {
+        ticketDiscount.type = button.dataset.ticketDiscountType === "fixed" ? "fixed" : "percent";
+        renderBasket();
+        if ($("ticketDiscountValue")) $("ticketDiscountValue").focus();
+      };
+    });
+    if ($("clearTicketDiscountBtn")) $("clearTicketDiscountBtn").onclick = function () { resetTicketDiscount(); renderBasket(); };
     document.querySelectorAll("[data-ticket-payment]").forEach(function (button) {
       button.onclick = function () {
         if ($("ticketPaymentSelect")) $("ticketPaymentSelect").value = button.dataset.ticketPayment;
@@ -10125,6 +11215,7 @@
       alert("Este navegador no soporta IndexedDB. Use Chrome, Edge o Firefox.");
       return;
     }
+    configureMercadoLibreModule();
     bind();
     loadDevUiSettings();
     loadUpdateSettings();

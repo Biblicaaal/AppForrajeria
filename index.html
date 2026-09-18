@@ -19,7 +19,7 @@
       }
     })();
   </script>
-  <link rel="stylesheet" href="styles.css?v=suppliers-costs-20260812-1">
+  <link rel="stylesheet" href="styles.css?v=pos-20260917-2">
 </head>
 <body>
 <audio id="cashSound" src="assets/cash_register.mp3" preload="auto"></audio>
@@ -33,12 +33,11 @@
     <label>Usuario</label>
     <select id="loginUser" autocomplete="off">
       <option value="admin">admin</option>
-      <option value="dev">dev</option>
       <option value="turno_manana" selected>turno_manana</option>
       <option value="turno_tarde">turno_tarde</option>
     </select>
     <label>Contrasena</label>
-    <input id="loginPass" type="password" autofocus autocomplete="new-password" inputmode="numeric" name="login_pin" placeholder="Clave obligatoria">
+    <input id="loginPass" type="password" autofocus autocomplete="new-password" name="login_pin" placeholder="Clave obligatoria">
     <div id="loginStatus" class="login-status" aria-live="polite"></div>
     <div class="login-two login-auto-work">
       <div>
@@ -145,8 +144,18 @@
             <small id="barcodeStatus">Escanee un producto para agregarlo automaticamente.</small>
           </label>
           <div id="basketItems" class="mini-list ticket-items"></div>
+          <section id="ticketDiscountBox" class="ticket-discount-box" aria-label="Descuento del ticket">
+            <span>Descuento</span>
+            <div class="ticket-discount-modes" role="group" aria-label="Tipo de descuento">
+              <button type="button" class="active" data-ticket-discount-type="percent">%</button>
+              <button type="button" data-ticket-discount-type="fixed">$</button>
+            </div>
+            <input id="ticketDiscountValue" inputmode="decimal" placeholder="0" aria-label="Valor del descuento">
+            <b id="ticketDiscountAmount">- $ 0,00</b>
+            <button id="clearTicketDiscountBtn" type="button" aria-label="Quitar descuento">×</button>
+          </section>
           <div id="basketRoundingSummary" class="ticket-rounding-summary hidden">
-            <div><span>Subtotal</span><b id="basketSubtotal">$ 0,00</b></div>
+            <div><span>Subtotal luego del descuento</span><b id="basketSubtotal">$ 0,00</b></div>
             <div><span>Redondeo hacia abajo</span><b id="basketRoundingAdjustment">$ 0,00</b></div>
           </div>
           <div class="ticket-total"><span>Total</span><b id="basketTotal">$ 0,00</b></div>
@@ -214,15 +223,14 @@
           <div class="product-modal-icon" id="productModalIcon"></div>
           <h2 id="productModalTitle">Producto</h2>
           <input id="productPriceInput" type="hidden">
+          <div id="productEntryMode" class="product-entry-mode" role="group" aria-label="Forma de ingresar la cantidad">
+            <button type="button" class="active" data-product-entry-mode="quantity">Cantidad</button>
+            <button type="button" data-product-entry-mode="money">Cantidad en pesos</button>
+          </div>
           <label id="productQuantityLabel">Cantidad
             <input id="productQuantityInput" inputmode="decimal" placeholder="Ingrese cantidad">
           </label>
-          <div id="productWeightQuick" class="product-weight-quick hidden" aria-label="Pesos frecuentes">
-            <button type="button" data-product-weight="0.25">250 g</button>
-            <button type="button" data-product-weight="0.5">500 g</button>
-            <button type="button" data-product-weight="0.75">750 g</button>
-            <button type="button" data-product-weight="1">1 kg</button>
-          </div>
+          <div id="productWeightQuick" class="product-weight-quick hidden" aria-label="Cantidades frecuentes"></div>
           <small id="productQuantityHelp" class="modal-note"></small>
           <div class="modal-total"><span>Total</span><b id="productModalTotal">$ 0,00</b></div>
           <div class="modal-actions">
@@ -439,6 +447,11 @@
           <section id="dailyClosureFormBox" class="report-box close-form-box">
             <h2>Nuevo cierre</h2>
             <form id="closureForm" class="close-form">
+              <div class="closure-expected-money">
+                <span>Dinero que deberia haber</span>
+                <b id="closureExpectedMoney">$ 0,00</b>
+                <small id="closureExpectedMoneyBreakdown">Efectivo esperado + QR esperado</small>
+              </div>
               <div class="closure-count-grid">
                 <label>Efectivo contado
                   <input id="countedCash" placeholder="Ingrese el contado" inputmode="decimal">
@@ -579,6 +592,15 @@
             <div class="metric-panel-head"><div><h3>Ventas por turno</h3><p>AM comparado con PM</p></div></div>
             <canvas id="metricsShiftChart" height="150"></canvas>
           </section>
+        </section>
+        <section class="report-box metrics-weather-card">
+          <div class="metric-panel-head">
+            <div><h3>Ventas y clima</h3><p>Seguimiento horario y resumen diario de 06:00 a 22:00</p></div>
+            <button id="weatherLocationBtn" type="button">Usar ubicacion de esta PC</button>
+          </div>
+          <div id="metricsWeatherStatus" class="metrics-weather-status"></div>
+          <div id="metricsWeatherPerformance" class="metrics-weather-performance"></div>
+          <small class="weather-attribution">Datos meteorologicos: <a href="https://open-meteo.com/" target="_blank" rel="noopener">Open-Meteo</a></small>
         </section>
       </section>
 
@@ -783,6 +805,7 @@
       </section>
       <section id="monthlySummary" class="balance-kpi-grid"></section>
       <section id="monthlyReport" class="balance-insight-strip"></section>
+      <section id="balanceWeeklyInsights" class="report-box balance-weekly-insights"></section>
       <section class="balance-workspace">
         <section class="report-box balance-calendar-box">
           <div class="balance-panel-heading">
@@ -815,6 +838,7 @@
             </label>
             <button class="big danger">Guardar gasto</button>
           </form>
+          <div id="balanceRecurringRules" class="balance-recurring-rules"></div>
         </details>
       </section>
       <section class="report-box balance-history-box">
@@ -967,7 +991,7 @@
               <div class="purchase-line-actions"><button id="purchaseCreateProductBtn" type="button">+ Crear nuevo producto</button><button id="purchaseAddLineBtn" class="primary" type="button">+ Agregar linea</button></div>
             </div>
             <div class="purchase-line-head" aria-hidden="true">
-              <span>Producto</span><span>Descripcion / codigo proveedor</span><span>Paquetes</span><span>Contenido</span><span>Unidad compra</span><span>Bonif.</span><span>Costo por paquete</span><span>Total / costo unitario</span><span></span>
+              <span>Producto</span><span>Descripcion / codigo proveedor</span><span>Paquetes</span><span>Contenido</span><span>Unidad compra</span><span>Bonif.</span><span>Costo por paquete</span><span>Desc. item</span><span>Total / costo unitario</span><span></span>
             </div>
             <div id="purchaseLinesEditor" class="purchase-lines-editor"></div>
           </section>
@@ -982,6 +1006,7 @@
             </div>
             <div class="purchase-calculated-totals">
               <div><span>Subtotal productos</span><b id="purchaseSubtotal">$ 0</b></div>
+              <div><span>Descuentos por producto</span><b id="purchaseLineDiscountTotal">$ 0</b></div>
               <div><span>Ajustes netos</span><b id="purchaseAdjustmentsTotal">$ 0</b></div>
               <div class="purchase-grand-total"><span>Total calculado</span><b id="purchaseGrandTotal">$ 0</b></div>
               <div id="purchaseInvoiceVarianceRow" class="purchase-invoice-variance hidden"><span>Diferencia con factura</span><b id="purchaseInvoiceVariance">$ 0</b></div>
@@ -1038,6 +1063,18 @@
             <input id="stockBarcodeInput" autocomplete="off" inputmode="none" placeholder="Scanner listo">
             <small id="stockBarcodeStatus">Scanner listo</small>
           </label>
+          <section id="stockValueDashboard" class="stock-value-dashboard" aria-label="Valores del stock en tienda">
+            <article title="Suma solamente el costo real conocido del stock actual; no estima productos sin costo.">
+              <span>Stock a costo conocido</span>
+              <b id="stockKnownCostValue">$ 0</b>
+              <small id="stockKnownCostCoverage">Sin productos con costo</small>
+            </article>
+            <article class="sale-value" title="Stock disponible multiplicado por el precio de venta actual.">
+              <span>Valor total de venta</span>
+              <b id="stockRetailValue">$ 0</b>
+              <small id="stockRetailCoverage">Sin productos con precio</small>
+            </article>
+          </section>
           <div class="stock-filters">
             <div class="stock-view-tabs" role="tablist" aria-label="Vista de inventario">
               <button type="button" data-stock-view="store" class="active">En la tienda</button>
@@ -1138,25 +1175,284 @@
       </div>
     </section>
 
-    <section id="tabActividad" class="tab-page hidden activity-page">
-      <div class="section-title">
-        <div>
-          <p>Inspeccion dev</p>
-          <h1>Actividad</h1>
+    <section id="tabMercadoLibre" class="tab-page hidden ml-page" data-title="Mercado Libre">
+      <section class="ml-command-bar report-box">
+        <div class="ml-command-copy">
+          <span class="ml-eyebrow">CANAL ONLINE · SOLO ADMINISTRACION</span>
+          <h1>Mercado Libre</h1>
+          <p>Investiga, prepara y revisa publicaciones sin tocar los precios ni el stock operativo de Caja.</p>
         </div>
-        <span class="soft-pill">Solo developer</span>
-      </div>
-      <section id="activitySummary" class="metrics-cards activity-summary"></section>
-      <section class="report-box activity-box">
-        <div class="activity-head">
-          <div>
-            <h2>Registro de cambios</h2>
-            <p>Ventas, cierres, gastos, produccion, usuarios, retiros, ediciones y borrados.</p>
-          </div>
-          <span class="activity-hint">Incidentes raros se marcan en color</span>
+        <div class="ml-command-actions">
+          <div id="mlConnectionStatus" class="ml-connection-status is-offline"><span></span><b>Sin configurar</b></div>
+          <button id="mlConfigureBtn" type="button">Configurar cuenta</button>
+          <button id="mlDiscoverBtn" class="primary" type="button">Evaluar productos</button>
         </div>
-        <div id="auditList" class="activity-list"></div>
       </section>
+
+      <nav id="mlWorkflowTabs" class="ml-workflow-tabs" aria-label="Flujo de Mercado Libre">
+        <button class="active" type="button" data-ml-view="summary">Resumen</button>
+        <button type="button" data-ml-view="candidates">Candidatos <b id="mlCountCandidates">0</b></button>
+        <button type="button" data-ml-view="review">En revision <b id="mlCountReview">0</b></button>
+        <button type="button" data-ml-view="ready">Listos para publicar <b id="mlCountReady">0</b></button>
+        <button type="button" data-ml-view="published">Publicados <b id="mlCountPublished">0</b></button>
+        <button type="button" data-ml-view="problems">Problemas <b id="mlCountProblems">0</b></button>
+      </nav>
+
+      <section id="mlSummaryPanel" class="ml-summary-panel">
+        <div id="mlSummaryCards" class="ml-summary-grid"></div>
+        <div class="ml-summary-columns">
+          <section class="report-box ml-attention-card">
+            <div class="panel-head"><div><h2>Atencion requerida</h2><p>Decisiones y datos que bloquean publicaciones.</p></div></div>
+            <div id="mlAttentionList" class="ml-attention-list"></div>
+          </section>
+          <section class="report-box ml-policy-card">
+            <div class="panel-head"><div><h2>Reglas de seguridad</h2><p>El canal online siempre queda bajo control humano.</p></div></div>
+            <ul>
+              <li>Ninguna publicacion sale sin la accion explicita <b>PUBLICAR</b>.</li>
+              <li>El costo cero se considera <b>COSTO DESCONOCIDO</b>.</li>
+              <li>Kg y litros no se convierten en paquetes cerrados.</li>
+              <li>El stock online usa un limite propio y nunca expone todo el stock fisico.</li>
+              <li>Las fotos de competidores solo sirven para investigar; nunca se reutilizan.</li>
+            </ul>
+          </section>
+        </div>
+      </section>
+
+      <section id="mlListPanel" class="report-box ml-list-panel hidden">
+        <div class="ml-list-toolbar">
+          <div>
+            <h2 id="mlListTitle">Candidatos</h2>
+            <p id="mlListSubtitle">Productos detectados para evaluar.</p>
+          </div>
+          <label class="ml-search-field">Buscar
+            <input id="mlSearchInput" type="search" placeholder="Producto, marca, categoria o ID ML">
+          </label>
+          <label>Ordenar
+            <select id="mlSortSelect">
+              <option value="priority">Prioridad</option>
+              <option value="score">Puntaje</option>
+              <option value="stock">Stock fisico</option>
+              <option value="price">Precio</option>
+              <option value="updated">Ultima actividad</option>
+            </select>
+          </label>
+        </div>
+        <div class="ml-table-head" aria-hidden="true">
+          <span>Producto</span><span>Evaluacion</span><span>Inventario ML</span><span>Estado</span><span>Acciones</span>
+        </div>
+        <div id="mlCandidateList" class="ml-candidate-list"></div>
+      </section>
+
+      <div id="mlConfigModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="mlConfigTitle">
+        <form id="mlConfigForm" class="modal-card ml-config-card" autocomplete="off">
+          <button id="mlCloseConfigBtn" class="modal-close" type="button" aria-label="Cerrar">×</button>
+          <span class="ml-eyebrow">CONEXION OFICIAL OAUTH 2.0</span>
+          <h2 id="mlConfigTitle">Cuenta de Mercado Libre</h2>
+          <p class="modal-note">Crea una aplicacion en Mercado Libre Developers y registra exactamente la URL de retorno indicada. El secreto y los tokens se cifran para este usuario de Windows y no entran en el respaldo ni en GitHub.</p>
+          <div class="ml-config-grid">
+            <label>App ID
+              <input id="mlAppId" required inputmode="numeric" placeholder="ID de la aplicacion">
+            </label>
+            <label>Secret Key
+              <input id="mlClientSecret" type="password" placeholder="Dejar vacio para conservar el actual">
+            </label>
+            <label class="ml-config-wide">Redirect URI registrada
+              <input id="mlRedirectUri" required value="http://127.0.0.1:4174/api/ml/oauth/callback">
+            </label>
+            <label>Gemini API key (opcional)
+              <input id="mlGeminiApiKey" type="password" placeholder="Dejar vacio para conservar la actual">
+            </label>
+            <label>Modelo del asistente
+              <input id="mlGeminiModel" value="gemini-2.5-flash" placeholder="gemini-2.5-flash">
+            </label>
+            <p class="ml-config-wide ml-config-note">La IA solo prepara borradores y alertas. Nunca recibe tokens de Mercado Libre, nunca publica y nunca cambia precios o stock.</p>
+          </div>
+          <div id="mlConfigFeedback" class="msg hidden"></div>
+          <div class="modal-actions">
+            <button id="mlRefreshConnectionBtn" type="button">Actualizar estado</button>
+            <button class="primary" type="submit">Guardar credenciales</button>
+            <button id="mlConnectBtn" class="success" type="button">Conectar cuenta</button>
+          </div>
+        </form>
+      </div>
+
+      <div id="mlReviewModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="mlReviewTitle">
+        <div class="modal-card ml-review-card">
+          <button id="mlCloseReviewBtn" class="modal-close" type="button" aria-label="Cerrar">×</button>
+          <div class="ml-review-head">
+            <div><span id="mlReviewState" class="ml-state-pill">DISCOVERED</span><h2 id="mlReviewTitle">Revision de producto</h2><p id="mlReviewMeta"></p></div>
+            <div id="mlReviewScore" class="ml-score-ring">0</div>
+          </div>
+          <div class="ml-review-layout">
+            <section class="ml-decision-panel">
+              <div class="ml-panel-title"><span>1</span><div><h3>Decisiones del administrador</h3><p>Estas son las decisiones comerciales que la aplicacion no toma sola.</p></div></div>
+              <div class="ml-decision-grid">
+                <label>Decision
+                  <select id="mlDecision">
+                    <option value="PENDING">Todavia no decidir</option>
+                    <option value="APPROVE">Publicar: si</option>
+                    <option value="REJECT">Publicar: no</option>
+                    <option value="PAUSE">Pausar evaluacion</option>
+                  </select>
+                </label>
+                <label>Precio de venta ML
+                  <input id="mlSellingPrice" inputmode="decimal" placeholder="Sin definir">
+                </label>
+                <label>Formato de venta
+                  <select id="mlOfferType"><option value="individual">Individual</option><option value="multipack">Pack / multipack</option></select>
+                </label>
+                <label id="mlPackUnitsLabel">Unidades por pack
+                  <input id="mlPackUnits" type="number" min="1" step="1" value="1">
+                </label>
+                <label>Estado del envase
+                  <select id="mlPackagingStatus">
+                    <option value="unknown">Sin confirmar</option>
+                    <option value="sealed">Cerrado / sellado</option>
+                    <option value="fractional">Fraccionado</option>
+                    <option value="mixed">Mixto</option>
+                  </select>
+                </label>
+                <label class="ml-check-label"><input id="mlPackagingConfirmed" type="checkbox"> Confirmo fisicamente el envase</label>
+                <label>Limite reservado para ML
+                  <input id="mlMaxStock" type="number" min="0" step="1" value="0">
+                </label>
+                <label>Reservado por pedidos ML
+                  <input id="mlReservedStock" type="number" min="0" step="1" value="0">
+                </label>
+              </div>
+              <div id="mlStockEquation" class="ml-stock-equation"></div>
+              <div class="ml-review-actions">
+                <button id="mlSaveReviewBtn" type="button">Guardar decisiones</button>
+                <button id="mlResearchBtn" class="primary" type="button">Investigar en Mercado Libre</button>
+                <button id="mlApproveBtn" class="success" type="button">Aprobar propuesta</button>
+              </div>
+            </section>
+
+            <section class="ml-agent-panel">
+              <div class="ml-panel-title"><span>2</span><div><h3>Preparado por el asistente</h3><p>Solo usa datos del POS, informacion oficial y resultados de investigacion.</p></div></div>
+              <div id="mlResearchSummary" class="ml-research-summary"></div>
+              <div id="mlIssuesList" class="ml-issues-list"></div>
+              <div class="ml-ai-action"><div><b>Asistente IA</b><span id="mlAiStatus">No configurado</span></div><button id="mlAiAssistBtn" type="button">Preparar borrador con IA</button></div>
+              <label>Titulo optimizado
+                <input id="mlListingTitle" maxlength="60" placeholder="Titulo de la publicacion">
+              </label>
+              <label>Categoria Mercado Libre
+                <div class="ml-inline-control"><input id="mlCategoryId" placeholder="Ej: MLA..." maxlength="20"><button id="mlPredictCategoryBtn" type="button">Predecir</button></div>
+                <small id="mlCategoryName">Sin categoria confirmada</small>
+              </label>
+              <div class="ml-three-fields">
+                <label>Tipo de publicacion<select id="mlListingType"><option value="gold_special">Clasica</option><option value="gold_pro">Premium</option><option value="free">Gratuita</option></select></label>
+                <label>Peso facturable (g)<input id="mlBillableWeight" type="number" min="1" step="1" placeholder="No inferir"></label>
+                <label>Precio minimo viable<input id="mlMinimumPrice" readonly placeholder="Costo desconocido"></label>
+              </div>
+              <label>Descripcion en texto plano
+                <textarea id="mlDescription" rows="7" maxlength="50000" placeholder="Descripcion preparada con datos verificables"></textarea>
+              </label>
+              <section class="ml-attributes-section">
+                <div class="ml-section-head"><div><h3>Atributos de la categoria</h3><p>Los obligatorios se consultan en vivo; no estan hardcodeados.</p></div><button id="mlLoadRequirementsBtn" type="button">Cargar requisitos</button></div>
+                <div id="mlAttributesList" class="ml-attributes-list"></div>
+              </section>
+              <section class="ml-images-section">
+                <div class="ml-section-head"><div><h3>Fotos propias</h3><p>Sube fotos propias o autorizadas y ordenalas. Nunca se copian imagenes de competidores.</p></div><label class="button-like">Agregar fotos<input id="mlImageInput" type="file" accept="image/jpeg,image/png,image/webp" multiple hidden></label></div>
+                <div id="mlImagesList" class="ml-images-list"></div>
+              </section>
+              <div class="ml-package-checklist">
+                <h3>Checklist de preparacion</h3>
+                <div id="mlPackageChecklist"></div>
+              </div>
+              <div class="ml-review-actions right">
+                <button id="mlPrepareBtn" class="primary" type="button">Preparar publicacion final</button>
+                <button id="mlOpenPreviewBtn" class="success" type="button">Ver vista final</button>
+              </div>
+            </section>
+          </div>
+        </div>
+      </div>
+
+      <div id="mlPreviewModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="mlPreviewTitle">
+        <div class="modal-card ml-preview-card">
+          <button id="mlClosePreviewBtn" class="modal-close" type="button" aria-label="Cerrar">×</button>
+          <span class="ml-eyebrow">CONTROL FINAL OBLIGATORIO</span>
+          <h2 id="mlPreviewTitle">Vista previa de publicacion</h2>
+          <div id="mlFinalPreview" class="ml-final-preview"></div>
+          <div class="ml-publish-confirm">
+            <label><input id="mlPublishReviewed" type="checkbox"> Revise titulo, fotos, categoria, atributos, precio y cantidad.</label>
+            <label>Escriba <b>PUBLICAR</b> para habilitar el envio
+              <input id="mlPublishPhrase" autocomplete="off" placeholder="PUBLICAR">
+            </label>
+            <button id="mlPublishBtn" class="big success" type="button" disabled>PUBLICAR</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="tabConteos" class="tab-page hidden stock-count-page">
+      <header class="stock-count-header">
+        <div><span>CONTROL DE INVENTARIO</span><h1>Conteos de stock</h1><p>Misiones breves para mantener cantidades y precios bajo control.</p></div>
+        <strong id="stockCountDeadlineBadge">Cargando ciclo...</strong>
+      </header>
+      <section id="stockCountSummary" class="stock-count-summary" aria-label="Resumen de conteos"></section>
+      <section class="stock-count-workspace">
+        <section class="report-box stock-count-missions-box">
+          <div class="stock-count-panel-head"><div><h2>Misiones pendientes</h2><p>Cuente lo que hay y confirme el precio exhibido.</p></div><div class="stock-count-panel-actions"><span id="stockCountMissionTotal">0</span><button id="stockCountRequestMissionBtn" type="button">+ Otra mision</button></div></div>
+          <div id="stockCountMissionList" class="stock-count-mission-list"></div>
+        </section>
+        <aside class="report-box stock-count-progress-box">
+          <div class="stock-count-panel-head"><div><h2>Conteo mensual</h2><p>Cada mision completada suma al progreso.</p></div></div>
+          <div id="stockCountMonthlyProgress" class="stock-count-monthly-progress"></div>
+          <div id="stockCountMyActivity" class="stock-count-my-activity"></div>
+        </aside>
+      </section>
+      <section id="stockCountAdminArea" class="stock-count-admin-area hidden">
+        <section class="report-box stock-count-review-box">
+          <div class="stock-count-panel-head"><div><h2>Revisiones de inventario</h2><p>Diferencias de cantidad o precio informadas por los conteos.</p></div><span id="stockCountReviewTotal">0</span></div>
+          <div id="stockCountReviewList" class="stock-count-review-list"></div>
+        </section>
+        <section class="report-box stock-count-overdue-box">
+          <div class="stock-count-panel-head"><div><h2>Plazos y cumplimiento</h2><p>Misiones vencidas y actividad del ciclo actual.</p></div></div>
+          <div id="stockCountComplianceList" class="stock-count-compliance-list"></div>
+        </section>
+      </section>
+      <div id="stockCountModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="stockCountModalTitle">
+        <form id="stockCountForm" class="modal-card stock-count-modal-card" autocomplete="off">
+          <button id="closeStockCountModal" class="modal-close" type="button" aria-label="Cerrar">&times;</button>
+          <span class="stock-count-modal-kicker">MISION DE CONTEO</span>
+          <h2 id="stockCountModalTitle">Producto</h2>
+          <div id="stockCountExpected" class="stock-count-expected"></div>
+          <label>Cantidad fisica contada
+            <input id="stockCountActual" inputmode="decimal" placeholder="0" required>
+          </label>
+          <label>Precio exhibido por unidad / kg / litro
+            <input id="stockCountObservedPrice" inputmode="decimal" placeholder="$ 0" required>
+          </label>
+          <label>Nota opcional
+            <textarea id="stockCountNote" rows="2" maxlength="180" placeholder="Ej: mercaderia en deposito"></textarea>
+          </label>
+          <button class="big success" type="submit">Enviar conteo</button>
+        </form>
+      </div>
+      <div id="stockCountReviewModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="stockCountReviewTitle">
+        <form id="stockCountReviewForm" class="modal-card stock-count-review-modal-card" autocomplete="off">
+          <button id="closeStockCountReviewModal" class="modal-close" type="button" aria-label="Cerrar">&times;</button>
+          <span class="stock-count-modal-kicker">REVISION ADMIN</span>
+          <h2 id="stockCountReviewTitle">Revisar diferencia</h2>
+          <input id="stockCountReviewId" type="hidden">
+          <div id="stockCountReviewDetail" class="stock-count-review-detail"></div>
+          <label>Stock fisico definitivo
+            <input id="stockCountFinalStock" inputmode="decimal" required>
+          </label>
+          <label>Precio definitivo exhibido / POS
+            <input id="stockCountFinalPrice" inputmode="decimal" required>
+          </label>
+          <label>Nota de revision
+            <textarea id="stockCountAdminNote" rows="2" maxlength="220" placeholder="Control realizado por admin"></textarea>
+          </label>
+          <div class="modal-actions">
+            <button id="resolveStockCountNoChangeBtn" type="button">Cerrar sin cambios</button>
+            <button class="danger" type="submit">Aplicar correccion</button>
+          </div>
+        </form>
+      </div>
     </section>
 
     <section id="tabUsuarios" class="tab-page hidden users-page">
@@ -1403,6 +1699,14 @@
           <div id="devStoreList" class="dev-store-list"></div>
           <div id="exportBox" class="export-box hidden"></div>
         </section>
+        <section class="report-box dev-panel dev-wide activity-box dev-activity-box">
+          <div class="activity-head">
+            <div><h2>Actividad del sistema</h2><p>Ventas, cierres, gastos, conteos, usuarios, retiros, ediciones y borrados.</p></div>
+            <span class="activity-hint">Solo visible para developer</span>
+          </div>
+          <section id="activitySummary" class="metrics-cards activity-summary"></section>
+          <div id="auditList" class="activity-list"></div>
+        </section>
       </section>
       <div id="clearDataModal" class="modal hidden" role="dialog" aria-modal="true">
         <form id="clearDataForm" class="modal-card movement-edit-card" autocomplete="off">
@@ -1448,6 +1752,7 @@
 <script src="catalog-data.js?v=google-sheet-20260805-2"></script>
 <script src="xlsx-lite.js?v=20260807-1"></script>
 <script src="barcode-labels.js?v=stock-labels-20260811-1"></script>
-<script src="app.js?v=pos-20260829-1"></script>
+  <script src="mercado-libre.js?v=pos-20260917-2"></script>
+  <script src="app.js?v=pos-20260917-2"></script>
 </body>
 </html>

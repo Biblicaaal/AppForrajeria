@@ -1,6 +1,6 @@
 {
-  "version": "2026.08.29.1",
-  "notes": "Production POS update with persistent local backups, Excel stock import and export, editable and split-payment sales, daily and partial closures, supplier purchasing, clearer inventory and movement controls, compact business metrics, monthly reports, and barcode-label printing. Existing users, sales, closures, and stock remain intact.",
+  "version": "2026.09.17.2",
+  "notes": "Employees can request and complete additional stock-count missions at any time. Each product's first completed monthly mission advances the inventory coverage percentage, resolved yellow reviews no longer remain in the active queue, and the compact Stock valuation cards keep their text on one line. Existing business data and count history are preserved.",
   "repoUrl": "https://github.com/Biblicaaal/AppForrajeria",
   "downloadUrl": "https://github.com/Biblicaaal/AppForrajeria/archive/refs/heads/main.zip"
 }
