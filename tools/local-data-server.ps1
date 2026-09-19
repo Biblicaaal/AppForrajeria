@@ -1,12 +1,12 @@
 param(
-  [int]$Port = 4174,
+  [int]$Port = 4274,
   [switch]$Quiet
 )
 
 $ErrorActionPreference = "Stop"
 
 $AppDir = Split-Path -Parent $PSScriptRoot
-$DataDir = Join-Path $AppDir "_data"
+$DataDir = Join-Path $AppDir "_data_panaderia"
 $SnapshotPath = Join-Path $DataDir "app-data.json"
 $PreviousSnapshotPath = Join-Path $DataDir "app-data.previous.json"
 $ArchiveDir = Join-Path $DataDir "archives"
@@ -16,6 +16,7 @@ $TokenPath = Join-Path $DataDir "local-token.txt"
 $PidPath = Join-Path $DataDir "local-server.pid"
 $SnapshotStores = @("users", "sessions", "transactions", "closures", "monthlyEntries", "productionItems", "products", "baskets", "basketItems", "settings", "auditLog")
 $OptionalSnapshotStores = @("masterProducts", "suppliers", "purchases", "purchaseLines", "inventoryMovements", "purchaseCostHistory", "priceReviews", "priceHistory", "mlCandidates", "mlResearch", "mlListings", "mlSyncEvents", "weatherDaily", "stockCountMissions", "stockCountResults", "stockCountCampaigns")
+$OptionalSnapshotStores += @("recipes", "bakeryBatches")
 New-Item -ItemType Directory -Path $DataDir -Force | Out-Null
 New-Item -ItemType Directory -Path $ArchiveDir -Force | Out-Null
 New-Item -ItemType Directory -Path $InvoiceDir -Force | Out-Null

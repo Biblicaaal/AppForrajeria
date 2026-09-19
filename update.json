@@ -1,6 +1,6 @@
 {
-  "version": "2026.09.17.2",
-  "notes": "Employees can request and complete additional stock-count missions at any time. Each product's first completed monthly mission advances the inventory coverage percentage, resolved yellow reviews no longer remain in the active queue, and the compact Stock valuation cards keep their text on one line. Existing business data and count history are preserved.",
+  "version": "2026.09.18.2",
+  "notes": "La Nueva Fe bakery pilot: approved recipes linked to finished products, gram/kilogram conversions, production submissions and administrator confirmation with atomic ingredient consumption and finished-stock receipts. Separate bakery data. Pilot distribution remains manual.",
   "repoUrl": "https://github.com/Biblicaaal/AppForrajeria",
-  "downloadUrl": "https://github.com/Biblicaaal/AppForrajeria/archive/refs/heads/main.zip"
+  "downloadUrl": "https://github.com/Biblicaaal/AppForrajeria/archive/refs/heads/alternative-build.zip"
 }

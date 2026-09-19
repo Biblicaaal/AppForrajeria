@@ -2,7 +2,7 @@
 <html lang="es">
 <head>
   <meta charset="utf-8">
-  <title>Forrajeria La Vieja Esquina</title>
+  <title>La Nueva Fe Panadería</title>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#123f45">
   <link rel="manifest" href="manifest.webmanifest">
@@ -19,15 +19,15 @@
       }
     })();
   </script>
-  <link rel="stylesheet" href="styles.css?v=pos-20260917-2">
+  <link rel="stylesheet" href="styles.css?v=bakery-20260918-2">
 </head>
 <body>
 <audio id="cashSound" src="assets/cash_register.mp3" preload="auto"></audio>
 
 <section id="loginView" class="login-body">
   <form id="loginForm" class="login-card" autocomplete="off" autocapitalize="off" spellcheck="false">
-    <img src="assets/logo.svg" class="logo" alt="Forrajeria La Vieja Esquina">
-    <div class="bakery-login-badge"><span></span>Forrajeria local</div>
+    <h2 class="bakery-wordmark">La Nueva Fe <small>Panadería</small></h2>
+    <div class="bakery-login-badge"><span></span>Elaboracion y venta</div>
     <div id="loginDataStatus" class="data-safety-status local">Guardado local activo</div>
     <h1>Inicio de sesion</h1>
     <label>Usuario</label>
@@ -64,7 +64,7 @@
 <section id="appView" class="hidden">
   <header class="topbar">
     <div class="brand-lockup">
-      <strong>La Vieja Esquina</strong>
+      <strong>La Nueva Fe · Panadería</strong>
       <span class="user" id="sessionInfo"></span>
       <span id="dataSafetyStatus" class="data-safety-status local">Guardado local activo</span>
     </div>
@@ -86,6 +86,43 @@
   </section>
 
   <main>
+    <section id="tabRecetas" class="tab-page hidden">
+      <div class="report-box"><h1>Recetas</h1><p>Ingredientes, rendimiento e instrucciones de elaboracion.</p>
+        <button id="recipeNew" type="button">+ Nueva receta</button>
+        <div id="recipeList"></div>
+      </div>
+      <div id="recipeDialog" class="modal hidden" role="dialog" aria-modal="true" aria-label="Editar receta">
+        <form id="recipeForm" class="modal-card" style="width:min(850px,96vw);max-height:90vh;overflow:auto">
+          <h2>Receta · nueva version</h2>
+          <label>Nombre<input id="recipeName" required maxlength="100"></label>
+          <label>Producto terminado en Stock<select id="recipeOutput" required></select></label>
+          <label>Rendimiento por tanda<input id="recipeYield" type="number" min="0.001" step="any" required></label>
+          <label>Unidad de rendimiento<select id="recipeUnit"><option value="unidad">unidades</option><option value="kg">kg</option><option value="litro">litros</option></select></label>
+          <h3>Ingredientes</h3><p>Cantidades por tanda. Puede indicar gramos aunque el stock se lleve en kg.</p><div id="recipeIngredients"></div>
+          <button id="recipeAddIngredient" type="button">+ Ingrediente</button>
+          <label>Preparacion e instrucciones<textarea id="recipeSteps" rows="6" required></textarea></label>
+          <label>Notas de conservacion y alergenos declarados<textarea id="recipeNotes" rows="2"></textarea></label>
+          <label>Estado<select id="recipeStatus"><option value="DRAFT">Borrador</option><option value="APPROVED">Aprobada para consultar</option></select></label>
+          <p id="recipeError" role="alert"></p>
+          <button type="submit">Guardar version</button><button id="recipeClose" type="button">Cancelar</button>
+        </form>
+      </div>
+    </section>
+    <section id="tabElaboracion" class="tab-page hidden">
+      <div class="report-box"><h1>Producción</h1><p>Registre lo elaborado en el obrador. Los productos comprados para reventa ingresan desde Proveedores.</p>
+        <form id="batchForm" class="batch-form">
+          <label>Receta aprobada<select id="batchRecipe" required></select></label>
+          <label>Tandas elaboradas<input id="batchMultiplier" type="number" min="0.001" step="any" value="1" required></label>
+          <label>Fecha de elaboracion<input id="batchDate" type="date" required></label>
+          <label>Produccion obtenida<input id="batchActual" type="number" min="0.001" step="any" required></label>
+          <div id="batchExpected"></div>
+          <label>Observaciones / motivo de diferencia<textarea id="batchNote" rows="2" maxlength="500"></textarea></label>
+          <div id="batchPreview" class="batch-preview"></div>
+          <button type="submit" id="batchSubmit">Enviar produccion a revision</button>
+        </form><p id="batchMessage" role="status"></p>
+        <h2>Registro de produccion</h2><div id="batchHistory"></div>
+      </div>
+    </section>
     <section id="tabCaja" class="tab-page">
       <div class="pos-focus-head">
         <div>
@@ -1673,7 +1710,7 @@
               <button id="downloadUpdateBtn" type="button">Descargar ZIP manual</button>
               <button id="openRepoBtn" type="button">Abrir repo</button>
             </div>
-            <p id="updateDetailText" class="modal-note">Para instalacion automatica, abrir siempre con LaViejaEsquina.exe. El updater manual sigue disponible.</p>
+            <p id="updateDetailText" class="modal-note">Abra esta instalacion solamente con LaNuevaFePanaderia.exe. Las actualizaciones del piloto son manuales.</p>
           </div>
         </section>
         <section class="report-box dev-panel dev-wide">
@@ -1749,10 +1786,12 @@
 </div>
 <div id="toastHost" class="toast-container"></div>
 <script src="printers.js?v=forrajeria-pos-stock-20260708-10"></script>
-<script src="catalog-data.js?v=google-sheet-20260805-2"></script>
+<script src="bakery-production-core.js?v=1"></script>
+<script src="bakery-production.js?v=1"></script>
+<script src="bakery-recipes.js?v=2"></script>
 <script src="xlsx-lite.js?v=20260807-1"></script>
 <script src="barcode-labels.js?v=stock-labels-20260811-1"></script>
-  <script src="mercado-libre.js?v=pos-20260917-2"></script>
-  <script src="app.js?v=pos-20260917-2"></script>
+  <script src="mercado-libre.js?v=bakery-20260918-2"></script>
+  <script src="app.js?v=bakery-20260918-2"></script>
 </body>
 </html>

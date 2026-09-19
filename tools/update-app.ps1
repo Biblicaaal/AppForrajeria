@@ -3,10 +3,11 @@ param(
   [switch]$Auto,
   [switch]$Quiet,
   [string]$Repo = "Biblicaaal/AppForrajeria",
-  [string]$Branch = "main"
+  [string]$Branch = "alternative-build"
 )
 
 $ErrorActionPreference = "Stop"
+throw "Las actualizaciones del piloto de panaderia estan deshabilitadas hasta validar su distribucion separada."
 
 function Write-Step {
   param([string]$Message)

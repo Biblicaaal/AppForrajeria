@@ -3,7 +3,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Windows.Forms;
 
-internal static class LaViejaEsquinaLauncher
+internal static class LaNuevaFePanaderiaLauncher
 {
     [STAThread]
     private static void Main()
@@ -11,12 +11,12 @@ internal static class LaViejaEsquinaLauncher
         try
         {
             string folder = AppDomain.CurrentDomain.BaseDirectory;
-            string batch = Path.Combine(folder, "Abrir-AppCajaPana.bat");
+            string batch = Path.Combine(folder, "Abrir-LaNuevaFePanaderia.bat");
             if (!File.Exists(batch))
             {
                 MessageBox.Show(
-                    "No se encontro Abrir-AppCajaPana.bat junto al ejecutable.",
-                    "La Vieja Esquina",
+                    "No se encontro Abrir-LaNuevaFePanaderia.bat junto al ejecutable.",
+                    "La Nueva Fe Panaderia",
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Error);
                 return;
@@ -36,8 +36,8 @@ internal static class LaViejaEsquinaLauncher
         catch (Exception error)
         {
             MessageBox.Show(
-                "No se pudo abrir La Vieja Esquina.\r\n\r\n" + error.Message,
-                "La Vieja Esquina",
+                "No se pudo abrir La Nueva Fe Panaderia.\r\n\r\n" + error.Message,
+                "La Nueva Fe Panaderia",
                 MessageBoxButtons.OK,
                 MessageBoxIcon.Error);
         }

@@ -1,11 +1,11 @@
 (function () {
   "use strict";
 
-  var DB_NAME = "forrajeria_caja_static_v1";
-  var DB_VERSION = 6;
-  var APP_VERSION = "2026.09.17.2";
+  var DB_NAME = "panaderia_pos_v1";
+  var DB_VERSION = 8;
+  var APP_VERSION = "2026.09.18.2";
   var APP_REPO = "Biblicaaal/AppForrajeria";
-  var APP_BRANCH = "main";
+  var APP_BRANCH = "alternative-build";
   var UPDATE_MANIFEST_URL = "https://raw.githubusercontent.com/" + APP_REPO + "/" + APP_BRANCH + "/update.json";
   var UPDATE_ZIP_URL = "https://github.com/" + APP_REPO + "/archive/refs/heads/" + APP_BRANCH + ".zip";
   var UPDATE_REPO_URL = "https://github.com/" + APP_REPO;
@@ -14,11 +14,11 @@
   var MERCADO_LIBRE_STORES = ["mlCandidates", "mlResearch", "mlListings", "mlSyncEvents"];
   var CONTEXT_STORES = ["weatherDaily"];
   var STOCK_COUNT_STORES = ["stockCountMissions", "stockCountResults", "stockCountCampaigns"];
-  var STORES = CORE_STORES.concat(PURCHASING_STORES, MERCADO_LIBRE_STORES, CONTEXT_STORES, STOCK_COUNT_STORES);
+  var STORES = CORE_STORES.concat(PURCHASING_STORES, MERCADO_LIBRE_STORES, CONTEXT_STORES, STOCK_COUNT_STORES, ["recipes", "bakeryBatches"]);
   var CLEAN_SLATE_VERSION = "2026-08-07-production-clean-1";
   var CLEAN_SLATE_STORAGE_KEY = "forrajeriaCleanSlateVersion";
-  var LOCAL_DATA_ENDPOINT = "http://127.0.0.1:4174/api/data-snapshot";
-  var MONTHLY_REPORT_ENDPOINT = "http://127.0.0.1:4174/api/monthly-report";
+  var LOCAL_DATA_ENDPOINT = "http://127.0.0.1:4274/api/data-snapshot";
+  var MONTHLY_REPORT_ENDPOINT = "http://127.0.0.1:4274/api/monthly-report";
   var localDataToken = "";
   var diskSnapshotServiceReady = false;
   var diskSnapshotWritesEnabled = false;
@@ -333,7 +333,7 @@
   function defaultTicketSettings() {
     return {
       printerName: "",
-      businessName: "FORRAJERIA LA VIEJA ESQUINA",
+      businessName: "LA NUEVA FE PANADERIA",
       cuit: "",
       address: "",
       iva: "Comprobante no fiscal"
@@ -399,7 +399,7 @@
     if (e) e.preventDefault();
     localStorage.setItem("forrajeriaTicketSettings", JSON.stringify({
       printerName: $("ticketPrinterName") ? $("ticketPrinterName").value.trim() : "",
-      businessName: $("ticketBusinessName") ? $("ticketBusinessName").value.trim() : "FORRAJERIA LA VIEJA ESQUINA",
+      businessName: $("ticketBusinessName") ? $("ticketBusinessName").value.trim() : "LA NUEVA FE PANADERIA",
       cuit: $("ticketCuit") ? $("ticketCuit").value.trim() : "",
       address: $("ticketAddress") ? $("ticketAddress").value.trim() : "",
       iva: $("ticketIva") ? $("ticketIva").value.trim() : "Comprobante no fiscal"
@@ -431,7 +431,7 @@
     if ($("localVersionLabel")) $("localVersionLabel").textContent = APP_VERSION;
     if (!info) {
       if ($("updateStatusLabel")) $("updateStatusLabel").textContent = "Sin revisar";
-      if ($("updateDetailText")) $("updateDetailText").textContent = "Abrir con LaViejaEsquina.exe para instalar updates automaticamente antes de entrar.";
+      if ($("updateDetailText")) $("updateDetailText").textContent = "Abra esta instalacion solamente con LaNuevaFePanaderia.exe. Las actualizaciones del piloto son manuales.";
       return;
     }
     if ($("updateStatusLabel")) $("updateStatusLabel").textContent = info.available ? "Update disponible" : (info.error ? "Error de conexion" : "Al dia");
@@ -485,7 +485,7 @@
   function openUpdateModal(info) {
     info = info || JSON.parse(localStorage.getItem("bakeryLastUpdateCheck") || "null");
     if (!info || !info.available || !$("updateModal")) return;
-    $("updateModalDetail").textContent = (info.message || "Hay una version nueva disponible.") + " Cerrar y volver a abrir con LaViejaEsquina.exe para instalarla automaticamente.";
+    $("updateModalDetail").textContent = (info.message || "Hay una version nueva disponible.") + " La actualizacion del piloto de panaderia debe instalarse manualmente.";
     $("updateModal").classList.remove("hidden");
   }
   function closeUpdateModal() {
@@ -508,11 +508,11 @@
       navigator.clipboard.writeText(text).then(function () {
         toast("Comando de updater copiado");
     }).catch(function () {
-        toast("Abrir LaViejaEsquina.exe para actualizar automaticamente");
+        toast("La actualizacion del piloto de panaderia es manual");
       });
       return;
     }
-    toast("Abrir LaViejaEsquina.exe para actualizar automaticamente");
+    toast("La actualizacion del piloto de panaderia es manual");
   }
   function defaultDevUiSettings() {
     return { density: "normal", theme: "green", motion: "on", performance: "normal", saleWidth: 380, shelfHeight: 180 };
@@ -689,7 +689,7 @@
     if (!/^\/[A-Za-z0-9_?&=.%\/-]*$/.test(path)) return Promise.reject(new Error("Ruta de Mercado Libre invalida"));
     options = options || {};
     var headers = Object.assign({}, options.headers || {}, { "X-App-Token": localDataToken });
-    return fetch("http://127.0.0.1:4174/api/ml" + path, Object.assign({}, options, { headers: headers, cache: "no-store" }));
+    return fetch("http://127.0.0.1:4274/api/ml" + path, Object.assign({}, options, { headers: headers, cache: "no-store" }));
   }
   function weatherSettings() {
     try { return JSON.parse(localStorage.getItem("forrajeriaWeatherSettings") || "{}"); }
@@ -863,7 +863,7 @@
       var existing = rows.filter(function (row) { return row.date === today(); })[0];
       if (existing && Array.isArray(existing.hourlyObservations) && existing.hourlyObservations.length && Date.now() - new Date(existing.updatedAt || existing.observedAt || 0).getTime() < 55 * 60 * 1000) return existing;
       if (!localDataToken || !diskSnapshotServiceReady) throw new Error("El servicio local no esta listo");
-      var url = "http://127.0.0.1:4174/api/weather?latitude=" + encodeURIComponent(Number(settings.latitude).toFixed(3)) + "&longitude=" + encodeURIComponent(Number(settings.longitude).toFixed(3));
+      var url = "http://127.0.0.1:4274/api/weather?latitude=" + encodeURIComponent(Number(settings.latitude).toFixed(3)) + "&longitude=" + encodeURIComponent(Number(settings.longitude).toFixed(3));
       return fetch(url, { cache: "no-store", headers: { "X-App-Token": localDataToken } }).then(function (response) {
         return response.json().catch(function () { return {}; }).then(function (body) { if (!response.ok) throw new Error(body.error || "No se pudo consultar el clima"); return body; });
       }).then(function (payload) { return saveWeatherPayload(payload, settings); });
@@ -902,22 +902,23 @@
     var fileName = attachment && attachment.fileName || "factura.jpg";
     if (!dataUrl) return Promise.resolve(null);
     if (!localDataToken || !diskSnapshotServiceReady) return Promise.resolve({ id: id, storage: "inline-preview", dataUrl: dataUrl, fileName: fileName, mimeType: String(dataUrl).split(/[;:]/)[1] || "image/jpeg" });
-    return fetch("http://127.0.0.1:4174/api/invoice-attachment/" + encodeURIComponent(id), { method: "POST", cache: "no-store", headers: { "Content-Type": "application/json; charset=utf-8", "X-App-Token": localDataToken }, body: JSON.stringify({ dataUrl: dataUrl, fileName: fileName }) }).then(function (response) { if (!response.ok) return response.json().catch(function(){return {};}).then(function(body){throw new Error(body.error || "No se pudo guardar la factura");}); return response.json(); });
+    return fetch("http://127.0.0.1:4274/api/invoice-attachment/" + encodeURIComponent(id), { method: "POST", cache: "no-store", headers: { "Content-Type": "application/json; charset=utf-8", "X-App-Token": localDataToken }, body: JSON.stringify({ dataUrl: dataUrl, fileName: fileName }) }).then(function (response) { if (!response.ok) return response.json().catch(function(){return {};}).then(function(body){throw new Error(body.error || "No se pudo guardar la factura");}); return response.json(); });
   }
   function purchaseLoadAttachment(ref) {
     if (!ref) return Promise.resolve(null); if (ref.storage === "inline-preview" || ref.dataUrl) return Promise.resolve(ref.dataUrl || null);
-    return fetch("http://127.0.0.1:4174/api/invoice-attachment/" + encodeURIComponent(ref.id), { method: "GET", cache: "no-store", headers: { "X-App-Token": localDataToken } }).then(function(response){if(!response.ok)throw new Error("No se encontro la factura adjunta");return response.json();}).then(function(body){return body.dataUrl;});
+    return fetch("http://127.0.0.1:4274/api/invoice-attachment/" + encodeURIComponent(ref.id), { method: "GET", cache: "no-store", headers: { "X-App-Token": localDataToken } }).then(function(response){if(!response.ok)throw new Error("No se encontro la factura adjunta");return response.json();}).then(function(body){return body.dataUrl;});
   }
   function purchaseRemoveAttachment(ref) {
     if (!ref) return Promise.resolve(true);
     return Promise.reject(new Error("Las facturas guardadas son evidencia permanente y no se eliminan"));
   }
   function validSnapshot(snapshot) {
+    if (!snapshot || snapshot.dbName !== DB_NAME) return false;
     if (!snapshot || snapshot.format !== "AppCajaPanaSnapshot" || Number(snapshot.schemaVersion) !== 1 || !snapshot.stores) return false;
     var legacyRequiredStores = CORE_STORES.filter(function (store) { return store !== "masterProducts"; });
     return legacyRequiredStores.every(function (store) {
       return Array.isArray(snapshot.stores[store]) && snapshot.stores[store].every(function (record) { return record && record.id != null; });
-    }) && ["masterProducts"].concat(PURCHASING_STORES, MERCADO_LIBRE_STORES, CONTEXT_STORES, STOCK_COUNT_STORES).every(function (store) {
+    }) && ["masterProducts", "recipes", "bakeryBatches"].concat(PURCHASING_STORES, MERCADO_LIBRE_STORES, CONTEXT_STORES, STOCK_COUNT_STORES).every(function (store) {
       return snapshot.stores[store] == null || (Array.isArray(snapshot.stores[store]) && snapshot.stores[store].every(function (record) { return record && record.id != null; }));
     });
   }
@@ -1032,7 +1033,7 @@
     if (!localDataToken) {
       diskSnapshotServiceReady = false;
       diskSnapshotWritesEnabled = false;
-      if (location.protocol === "file:") updatePersistenceStatus("Abra LaViejaEsquina.exe para activar la copia de seguridad", "warning");
+      if (location.protocol === "file:") updatePersistenceStatus("Abra LaNuevaFePanaderia.exe para activar la copia de seguridad", "warning");
       else updatePersistenceStatus("MODO PREVIEW: no cargar ventas reales aqui", "preview");
       return Promise.resolve();
     }
@@ -1792,7 +1793,7 @@
       }).then(function () {
         return add("sessions", currentSession);
       }).then(function () {
-        sessionStorage.setItem("bakerySession", JSON.stringify({ user: currentUser, session: currentSession }));
+        sessionStorage.setItem("panaderiaSession", JSON.stringify({ user: currentUser, session: currentSession }));
         return audit(firstPasswordSetup ? "PASSWORD_INITIALIZED" : "LOGIN", currentSession.shiftType + " cambio en caja " + money(currentSession.openingCash));
       }).then(function () {
         clearTimeout(loginTimeout);
@@ -1873,17 +1874,17 @@
       save = add("sessions", currentSession).then(function () { return audit("LOGOUT", currentUser.username); });
     }
     save.then(function () { return writeDiskSnapshot(true); }).then(function () {
-      sessionStorage.removeItem("bakerySession");
+      sessionStorage.removeItem("panaderiaSession");
       location.reload();
     }, function () {
-      sessionStorage.removeItem("bakerySession");
+      sessionStorage.removeItem("panaderiaSession");
       location.reload();
     });
   }
   function isAdmin() { return currentUser && (currentUser.role === "admin" || currentUser.role === "dev"); }
   function isDev() { return currentUser && currentUser.role === "dev"; }
   function visibleTabs() {
-    var tabs = isAdmin() ? ["Caja", "Conteos", "Cierres", "Metricas", "Produccion", "Proveedores", "MercadoLibre", "Movimientos", "Balance", "Usuarios"] : ["Caja", "Conteos"];
+    var tabs = isAdmin() ? ["Caja", "Recetas", "Elaboracion", "Conteos", "Cierres", "Metricas", "Produccion", "Proveedores", "Movimientos", "Balance", "Usuarios"] : ["Caja", "Recetas", "Elaboracion", "Conteos"];
     if (isDev()) tabs = tabs.concat(["Dev"]);
     return orderedTabs(tabs);
   }
@@ -1918,7 +1919,7 @@
   function buildTabs() {
     var tabs = visibleTabs();
     if (tabs.indexOf(currentTab) < 0) currentTab = "Caja";
-    var labels = {Metricas: "Metricas", Produccion: "Stock", MercadoLibre: "Mercado Libre"};
+    var labels = {Metricas: "Metricas", Produccion: "Stock", Elaboracion: "Produccion", MercadoLibre: "Mercado Libre"};
     $("tabs").innerHTML = "";
     tabs.forEach(function (name) {
       var btn = document.createElement("button");
@@ -1966,7 +1967,7 @@
   }
   function reorderTabs(from, to) {
     var visible = Array.prototype.slice.call(document.querySelectorAll("#tabs [data-tab]")).map(function (b) { return b.dataset.tab; });
-    var allKnown = ["Caja", "Conteos", "Cierres", "Metricas", "Produccion", "Proveedores", "MercadoLibre", "Movimientos", "Balance", "Usuarios", "Dev"];
+    var allKnown = ["Caja", "Recetas", "Elaboracion", "Conteos", "Cierres", "Metricas", "Produccion", "Proveedores", "MercadoLibre", "Movimientos", "Balance", "Usuarios", "Dev"];
     var order = tabOrder().length ? tabOrder().filter(function (x) { return allKnown.indexOf(x) >= 0; }) : allKnown.slice();
     allKnown.forEach(function (x) { if (order.indexOf(x) < 0) order.push(x); });
     var scoped = visible.slice();
@@ -2071,7 +2072,7 @@
       businessDate: clock.businessDate,
       shiftType: clock.shiftType
     };
-    sessionStorage.setItem("bakerySession", JSON.stringify({ user: currentUser, session: currentSession }));
+    sessionStorage.setItem("panaderiaSession", JSON.stringify({ user: currentUser, session: currentSession }));
     updateSessionInfo();
     if ($("workDateInput")) $("workDateInput").value = currentSession.businessDate;
     if ($("workShiftInput")) $("workShiftInput").value = currentSession.shiftType;
@@ -2803,7 +2804,7 @@
       businessDate: currentSession.businessDate,
       shiftType: currentSession.shiftType,
       items: amounts.discountAmount > 0 || Math.abs(amounts.roundingAdjustment) >= 0.01
-        ? [{ title: "Ticket La Vieja Esquina (ajustado)", quantity: 1, unit_price: total }]
+        ? [{ title: "Ticket Panaderia (ajustado)", quantity: 1, unit_price: total }]
         : details.map(function (it) {
           return { title: it.productName, quantity: Number(it.quantity || 1), unit_price: Number(it.unitPrice || it.subtotal || 0) };
         })
@@ -2964,7 +2965,7 @@
     var grossSubtotal = Number(receipt.grossSubtotal != null ? receipt.grossSubtotal : unroundedAmount + Number(receipt.discountAmount || 0));
     var discountAmount = Math.max(0, Number(receipt.discountAmount || 0));
     var settings = receipt.settings || ticketSettings();
-    var businessName = settings.businessName || "FORRAJERIA LA VIEJA ESQUINA";
+    var businessName = settings.businessName || "LA NUEVA FE PANADERIA";
     var legal = [settings.cuit ? "CUIT: " + settings.cuit : "", settings.address || "", settings.iva || "Comprobante no fiscal"].filter(Boolean);
     return "<!doctype html><html><head><meta charset='utf-8'><title>Ticket</title><style>"
       + "@page{size:58mm auto;margin:0}*{box-sizing:border-box}body{margin:0;padding:8px;width:58mm;font-family:Consolas,'Courier New',monospace;color:#000;background:#fff;font-size:11px}.center{text-align:center}.brand{font-weight:900;font-size:15px;text-transform:uppercase}.line{border-top:1px dashed #000;margin:7px 0}.row{display:flex;justify-content:space-between;gap:6px}.item{margin:5px 0}.item b{display:block;font-size:11px}.item small{display:block}.total{font-size:15px;font-weight:900}.muted{font-size:10px}p{margin:3px 0}.legal{font-size:10px;line-height:1.25}</style></head><body>"
@@ -3185,7 +3186,7 @@
   }
   function closureTicketHtml(closure) {
     var settings = ticketSettings();
-    var businessName = settings.businessName || "FORRAJERIA LA VIEJA ESQUINA";
+    var businessName = settings.businessName || "LA NUEVA FE PANADERIA";
     var created = new Date(closure.createdAt || nowIso());
     var isPartial = closure.closureKind === "PARTIAL";
     var ticketTitle = isPartial ? "CONTROL DE CAMBIO AM -> PM" : "CIERRE DIARIO";
@@ -6117,7 +6118,7 @@
       var masterProducts = sets[1].slice().sort(function (a, b) { return String(a.name || "").localeCompare(String(b.name || "")); });
       var headers = ["ID", "Categoria", "Marca", "Producto", "Variante", "Stock", "Stock Min", "Unidad", "Precio", "Codigo", "Ubicacion", "Activo", "Notas", "Ult. Modificacion", "Nombre", "Unidad Precio", "Costo", "ID App"];
       var summaryRows = [
-        ["Stock de La Vieja Esquina", ""],
+        ["Stock de La Nueva Fe", ""],
         ["Exportado", new Date().toLocaleString("es-AR")],
         ["Productos activos en tienda", products.filter(function (p) { return p.active !== false; }).length],
         ["Productos dados de baja", products.filter(function (p) { return p.active === false; }).length],
@@ -6340,7 +6341,7 @@
     var printWindow = window.open("", "_blank", "width=500,height=760");
     if (!printWindow) { toast("Permita ventanas emergentes para imprimir"); return; }
     prepareSelectedStockLabels(printWindow).then(function (result) {
-      var html = window.ForrajeriaBarcodeLabels.printDocument(result.ready, ticketSettings().businessName || "LA VIEJA ESQUINA");
+      var html = window.ForrajeriaBarcodeLabels.printDocument(result.ready, ticketSettings().businessName || "LA NUEVA FE PANADERIA");
       printWindow.document.open();
       printWindow.document.write(html);
       printWindow.document.close();
@@ -8669,7 +8670,7 @@
     var model = metricsDashboardModel;
     if (!model) { toast("Las metricas todavia no estan listas"); return; }
     var rows = [
-      ["La Vieja Esquina · Resumen de metricas"],
+      ["La Nueva Fe · Resumen de metricas"],
       ["Periodo", model.period.currentFrom, model.period.currentTo],
       ["Ventas netas", model.currentRevenue],
       ["Tickets", model.currentSales.length],
@@ -8874,7 +8875,7 @@
       var withdrawalTotal = withdrawals.reduce(function (sumValue, row) { return sumValue + Number(row.amount || 0); }, 0);
       var completeClosures = closures.filter(function (row) { return (row.closureKind || "COMPLETE") === "COMPLETE"; });
       var report = [];
-      report.push("# Informe mensual integral - La Vieja Esquina");
+      report.push("# Informe mensual integral - La Nueva Fe");
       report.push("");
       report.push("- Periodo: " + month);
       report.push("- Generado: " + new Date().toLocaleString("es-AR"));
@@ -9578,7 +9579,7 @@
           currentSession.username = user.username;
           currentSession.displayName = user.displayName;
           currentSession.role = user.role;
-          sessionStorage.setItem("bakerySession", JSON.stringify({ user: currentUser, session: currentSession }));
+          sessionStorage.setItem("panaderiaSession", JSON.stringify({ user: currentUser, session: currentSession }));
           updateSessionInfo();
           buildTabs();
         }
@@ -9803,14 +9804,14 @@
     toast("Archivando copia y limpiando datos...");
     var operationalStores = STORES.filter(function (store) { return store !== "users"; });
     if (location.protocol === "file:" && !diskSnapshotServiceReady) {
-      toast("No se pudo crear la copia. Reinicie LaViejaEsquina.exe e intente de nuevo.");
+      toast("No se pudo crear la copia. Reinicie LaNuevaFePanaderia.exe e intente de nuevo.");
       return;
     }
     archiveCurrentSnapshot().then(function () {
       diskSnapshotPaused = true;
       return clearStoresAtomic(operationalStores);
     }).then(function () {
-      sessionStorage.removeItem("bakerySession");
+      sessionStorage.removeItem("panaderiaSession");
       localStorage.removeItem("bakeryTabOrder");
       localStorage.removeItem("forrajeriaMasterCatalogVersion");
       localStorage.removeItem("forrajeriaStoreCatalogVersion");
@@ -10712,6 +10713,8 @@
   }
 
   function renderAll() {
+    if (currentTab === "Elaboracion" && window.BakeryProduction) window.BakeryProduction.render();
+    if (currentTab === "Recetas" && window.BakeryRecipes) window.BakeryRecipes.render();
     if (currentTab === "Caja") renderCaja();
     if (currentTab === "Cierres") renderClosures();
     if (currentTab === "Balance") renderMonthly();
@@ -10940,7 +10943,7 @@
     $("applyWorkShift").onclick = function () {
       currentSession.businessDate = $("workDateInput").value || currentSession.businessDate;
       currentSession.shiftType = $("workShiftInput").value;
-      sessionStorage.setItem("bakerySession", JSON.stringify({ user: currentUser, session: currentSession }));
+      sessionStorage.setItem("panaderiaSession", JSON.stringify({ user: currentUser, session: currentSession }));
       add("sessions", currentSession).then(function () { return audit("WORK_SHIFT_CHANGED", currentSession.businessDate + " " + currentSession.shiftType); }).then(showApp);
     };
     $("monthPicker").onchange = function () {
@@ -11195,15 +11198,8 @@
     renderMonthlyReasonOptions();
   }
   function restoreSession() {
-    var raw = sessionStorage.getItem("bakerySession");
-    if (!raw) return false;
-    try {
-      var s = JSON.parse(raw);
-      currentUser = s.user;
-      currentSession = s.session;
-      showApp();
-      return true;
-    } catch (e) { return false; }
+    // Require a fresh login in the bakery pilot.
+    return false;
   }
 
   document.addEventListener("DOMContentLoaded", function () {
@@ -11216,6 +11212,8 @@
       return;
     }
     configureMercadoLibreModule();
+    if (window.BakeryRecipes) window.BakeryRecipes.configure({ all: all, db: dbPromise, isAdmin: isAdmin, user: function () { return currentUser; }, saved: scheduleDiskSnapshot, escape: escapeHtml, money: money, uid: uid });
+    if (window.BakeryProduction) window.BakeryProduction.configure({ all: all, db: dbPromise, isAdmin: isAdmin, user: function () { return currentUser; }, saved: scheduleDiskSnapshot, escape: escapeHtml, money: money, uid: uid, invalidate: invalidateProductSearchCache });
     bind();
     loadDevUiSettings();
     loadUpdateSettings();

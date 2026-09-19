@@ -1,12 +1,28 @@
-# La Vieja Esquina
+# La Nueva Fe Panadería — alternative-build pilot
+
+This branch is a separate bakery development pilot. It uses `panaderia_pos_v1`, `_data_panaderia`, `_perfil_panaderia`, and local port 4274. Store records in `_data` are not migrated or deleted. Open the bakery only in a separate installation folder; do not replace the running store installation with this branch. Automatic/manual updater execution is disabled while the bakery release workflow is being developed.
+
+La Nueva Fe produces on site and also sells purchased goods (drinks, cakes and other merchandise), by unit or weight. Purchased goods enter through Proveedores. Finished baked products enter through Produccion.
+
+Recetas saves ingredient quantities (kg/g, litre/ml, or units), the linked finished product, yield, instructions, notes, and immutable versions. Admins create and approve recipes; employees see approved recipes. Ingredients and finished products must first exist in Stock; start finished products at zero if they have not yet been produced.
+
+Produccion records approved recipe version, batch multiplier, actual yield, production date, employee and observations. A yield difference requires a reason. Submitting creates a pending record without changing stock. Administrators confirm or reject the batch. Confirmation rereads stock and applies ingredient consumption, finished-stock receipt, costing, inventory movements and audit in one IndexedDB transaction. Duplicate confirmation of the same batch cannot post twice. Insufficient stock blocks the whole operation. Records remain in production history; rejection does not delete them.
+
+Ingredient usage is the approved recipe multiplied by batches, not actual measured consumption; substitutions require a new approved recipe. Known material costs transfer to finished inventory only when all consumed ingredients have known costs. Otherwise the output has unknown cost and the batch retains the known component for review. No cash expense is created when producing, and selling finished goods must not consume ingredients again. Labor/energy/overhead, separate measured waste, production reversal, and expiry tracking remain planned. An observation about a lost unit is not a separate waste-accounting entry.
+
+Validation: `node --test tests/bakery-production.test.js`; `node tests/bakery-production-browser.cjs` uses Playwright with an isolated temporary browser and test-only IndexedDB, requiring Edge or BAKERY_TEST_BROWSER. It never contacts the live data service.
+
+See BAKERY-PLAN.md for remaining implementation and rollout gates.
+
+The documentation below describes inherited POS functionality and still contains legacy store naming.
 
 Caja Local Web para forrajeria, reconstruida como app estatica local-first.
 
 ## Uso
 
-Abrir `LaViejaEsquina.exe`. No abrir `index.html` ni usar la direccion de preview para ventas reales: el ejecutable mantiene siempre el mismo perfil de datos, inicia la copia de seguridad local y abre la caja sin consola.
+Abrir `LaNuevaFePanaderia.exe`. No abrir `index.html` ni usar la direccion de preview para operaciones reales: el ejecutable usa exclusivamente el perfil y los datos de la panaderia, inicia la copia local y abre la caja sin consola.
 
-Cada operacion se guarda primero en IndexedDB y tambien se copia automaticamente a `_data/app-data.json`. El archivo anterior queda en `_data/app-data.previous.json`; las copias creadas antes de una limpieza quedan en `_data/archives`. La aplicacion restaura esa copia si el perfil del navegador aparece vacio.
+Cada operacion se guarda primero en IndexedDB y tambien se copia automaticamente a `_data_panaderia/app-data.json`. El archivo anterior queda en `_data_panaderia/app-data.previous.json`; las copias historicas quedan en `_data_panaderia/archives`. La aplicacion restaura esa copia si el perfil del navegador aparece vacio.
 
 La actualizacion de la base es incremental: conserva usuarios, ventas, cierres, stock e historial existentes y agrega los nuevos almacenes sin reiniciar datos.
 
@@ -88,15 +104,15 @@ La caja sigue abriendose con `file://` para conservar el mismo origen de Indexed
 
 La forma mas liviana de usar la app en una PC vieja es copiar la carpeta completa a la laptop y abrir:
 
-`LaViejaEsquina.exe`
+`LaNuevaFePanaderia.exe`
 
-Ese launcher abre `Abrir-AppCajaPana.bat` sin mostrar consola, busca Chrome, Edge o un navegador portable en `Browser\chrome.exe`, y usa un perfil local en `_perfil_caja` para que los datos de la caja queden separados del navegador personal.
+Ese launcher abre `Abrir-LaNuevaFePanaderia.bat` sin mostrar consola, busca Chrome, Edge o un navegador portable en `Browser\chrome.exe`, y usa `_perfil_panaderia`. Nunca comparte el perfil, la base local ni el puerto de La Vieja Esquina.
 
-Antes de abrir la app, el launcher revisa `update.json` en GitHub. Si encuentra una version mas nueva, descarga el ZIP, crea un backup en `_backups`, reemplaza los archivos de la app y despues abre la caja. Si no hay internet o GitHub falla, abre la version local igual.
+Las actualizaciones automaticas permanecen deshabilitadas durante el piloto para impedir que una rama reemplace accidentalmente a la otra.
 
 Para dejar un icono en el escritorio:
 
-`Crear-Acceso-Directo.bat`
+`Crear-Acceso-Directo-Panaderia.bat`
 
 Si la laptop solo tiene Internet Explorer, instalar un navegador compatible primero. Internet Explorer no es recomendado para IndexedDB ni para esta app.
 
@@ -120,13 +136,7 @@ El usuario `dev` tiene la clave tecnica configurada por el propietario.
 
 ## Updates
 
-La app portable instala updates automaticamente cuando se abre con `LaViejaEsquina.exe` o `Abrir-AppCajaPana.bat`.
-
-Para forzar una instalacion manual en una terminal, cerrar la app y ejecutar:
-
-`Update-AppCajaPana.bat`
-
-Ese script descarga la ultima version desde GitHub, crea un backup en `_backups`, e instala los archivos nuevos en la carpeta del programa.
+La distribucion de esta rama es manual mientras sea un piloto. No copie sus archivos encima de `AppForrajeria` y no ejecute el actualizador heredado. Trabaje y pruebe la panaderia solamente desde su carpeta `LaNuevaFePanaderia`.
 
 Tambien se puede probar sin tocar archivos con:
 
